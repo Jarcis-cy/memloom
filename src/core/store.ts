@@ -628,6 +628,14 @@ export class Store {
     return rows.map(toDilemma);
   }
 
+  /** 轻声冒泡记一次：只在会话开场提醒过这些分歧后调用，同一条分歧每提醒一次加一；别的字段不动。 */
+  bumpDilemmaSurfaced(ids: readonly number[]): void {
+    if (ids.length === 0) return;
+    this.prepare(
+      `UPDATE dilemmas SET surfaced_count = surfaced_count + 1 WHERE id IN (${placeholders(ids.length)}) AND status = 'open'`,
+    ).run(...assertIdList(ids, '分歧编号'));
+  }
+
   /** 用户明确拍板后写回：只改状态、结论和时间；已解决的不再改（要改就重新登记一条新的分歧）。 */
   setDilemmaResolution(id: number, resolution: { status: 'resolved' | 'dismissed'; note: string; resolvedAt: string }): DilemmaRow {
     const current = this.getDilemma(id);

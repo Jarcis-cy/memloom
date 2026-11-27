@@ -328,17 +328,52 @@ function activeTarget(store: Store, id: number, scope: string): PrincipleRow {
   return row;
 }
 
-/** replace 必须有一条比旧原则更新、而且是纠错或事实的经历作依据，一条就够。 */
+/**
+ * 新旧基准：一条原则「有多新」看它依据的经历是什么时候发生的，不是它被写进库的时间。
+ * 旧经历在后台排到很晚才凝出原则时，写在原则之后、发生在那条经历之后的真实纠错仍然算「更新」；
+ * 原则没有任何还能查到的依据经历时，才退回它的创建时间。
+ */
+function evidenceBaseline(store: Store, target: PrincipleRow): string {
+  const sources = target.sourceExperienceIds.length > 0 ? store.getExperiences(target.sourceExperienceIds) : [];
+  const times = sources.map((e) => e.occurredAt).sort();
+  return times[times.length - 1] ?? target.createdAt;
+}
+
+/** replace 必须有一条比旧原则（按依据经历的发生时间算）更新、而且是纠错或事实的经历作依据，一条就够。 */
 function assertReplacementGrounded(store: Store, target: PrincipleRow, sourceIds: number[]): void {
+  const baseline = evidenceBaseline(store, target);
   const experiences = store.getExperiences(sourceIds);
   const qualifying = experiences.filter(
-    (e) => (e.kind === 'correction' || e.kind === 'fact') && e.occurredAt >= target.createdAt,
+    (e) => (e.kind === 'correction' || e.kind === 'fact') && e.occurredAt >= baseline,
   );
   if (qualifying.length === 0) {
     const kinds = experiences.map((e) => e.kind).join('、') || '没有';
     throw new PlanError(
       `replace 需要一条比原则 #${target.id} 更新的纠错或事实经历作依据；这次给的经历是：${kinds}`,
     );
+  }
+}
+
+/**
+ * 事务内的字面去重复核：两个互不相连的调用（两个进程、两个会话）在同一作用域上各自拿模型出计划时，
+ * 事务外那次查重看到的「现有原则」可能已经过期——这边刚提交了一条字面几乎一样的新原则。
+ * 这一步在同一把写锁里重读生效原则再比一遍；比出来就整体回滚，经历保持待处理。
+ */
+function recheckDuplicatesInTransaction(store: Store, scope: string, actions: PlanAction[]): void {
+  const creating = actions.filter((a): a is CreatingAction => a.action === 'add' || a.action === 'abstract_merge' || a.action === 'replace');
+  if (creating.length === 0) return;
+  const active = store.listPrinciples(scope, { status: 'active' });
+  for (const action of creating) {
+    const own = targetsOf(action);
+    const text = `${action.trigger_when}\n${action.rule}`;
+    for (const principle of active) {
+      if (own.includes(principle.id)) continue;
+      if (isNearDuplicate(text, `${principle.triggerWhen}\n${principle.rule}`)) {
+        throw new PlanError(
+          `新原则和刚刚才落库的原则 #${principle.id} 字面几乎一样（别的凝结抢先了一步）；这批经历保持待处理，重新凝结时请改用 reinforce 或 abstract_merge`,
+        );
+      }
+    }
   }
 }
 
@@ -350,6 +385,7 @@ function applyPlan(store: Store, context: ApplyContext): ActionOutcome[] {
     if (experience.processedAt !== null) throw new PlanError(`经历 #${experience.id} 已经被别的凝结处理过了，请重新拉取待处理经历再试`);
   }
   if (fresh.length < batch.length) throw new PlanError('这批经历里有已经被删除的，请重新拉取待处理经历再试');
+  recheckDuplicatesInTransaction(store, scope, actions);
 
   const outcomes: ActionOutcome[] = [];
   for (const action of actions) {

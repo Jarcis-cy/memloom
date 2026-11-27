@@ -6,6 +6,8 @@
  */
 import { resolveContext } from '../app/context.js';
 import { Memloom, NotConfiguredError, UsageError } from '../app/ops.js';
+import { projectCraft, refreshBrief, trustedCrewCli } from '../host/crew.js';
+import { hookCliMain } from '../host/hook-cli.js';
 
 const USAGE = `memloom —— 把 AI Agent 干活攒下的经历织成工作原则
 
@@ -28,6 +30,9 @@ const USAGE = `memloom —— 把 AI Agent 干活攒下的经历织成工作原�
                                            导入归档（默认 merge；replace 会把包里没有的生效原则软退役留底）
   daemon status | stop                     查看或安全停止共享检索服务（不启动、不杀未知进程）
   doctor                                   体检：配置、库、检索模式、容量（不启动模型）
+  hook --event                            宿主子进程入口：stdin 读一条 HostEvent 的 JSON，stdout 写一条 HostResponse 的 JSON（Pi 进程内常驻请直接用 src/host/index.ts 的 HostCore）；永远退出 0
+  craft sync [--brief]                     把当前项目 / 角色作用域的生效原则单向投到 .team/CRAFT.md 的 memloom 管理区（需要 --project [--role]）；
+                                           --brief 再用 MEMLOOM_CREW_CLI 指定的可信 agent-crew CLI 刷新 .team/BRIEF.md，没配置就提示手动
 
 通用参数：--home <目录>（默认 ~/.memloom）、--db <库文件>、--project <项目目录>、--role <角色名>、
           --state-dir <状态目录>、--scope <作用域>、--json（按 JSON 输出）
@@ -40,7 +45,7 @@ interface Args {
   flags: Record<string, string | true>;
 }
 
-const BOOLEAN_FLAGS = new Set(['json', 'help', 'all', 'core']);
+const BOOLEAN_FLAGS = new Set(['json', 'help', 'all', 'core', 'brief', 'event']);
 
 function parseArgs(argv: readonly string[]): Args {
   const words: string[] = [];
@@ -202,6 +207,15 @@ function render(command: string, result: unknown): string {
               : '共享检索服务没有在运行（下一次检索会按需自动拉起）';
       return r.message ? `${String(r.message)}\n${head}` : `${head}\n状态目录 ${String(status.stateDir ?? '')}`;
     }
+    case 'craft': {
+      const craft = r.craft as Record<string, unknown>;
+      const brief = r.brief as Record<string, unknown> | null;
+      const lines = [`CRAFT（${String(craft.scope)}）：${craft.status === 'ok' ? `已写入 ${String(craft.written)} 条到 ${String(craft.path)}` : craft.status === 'unchanged' ? '内容和数据库一致，没有改动' : String(craft.note)}`];
+      if (craft.note && craft.status !== 'skipped') lines.push(`  ${String(craft.note)}`);
+      if (brief) lines.push(`速览：${brief.status === 'ok' ? String(brief.note) : brief.status === 'manual' ? `${String(brief.note)}；${String(brief.manual)}` : String(brief.note)}`);
+      else lines.push('速览：没有加 --brief，BRIEF.md 没有刷新（它只由 agent-crew 的 crew brief --write 渲染）');
+      return lines.join('\n');
+    }
     case 'doctor': {
       const db = r.db as Record<string, unknown>;
       const retriever = r.retriever as Record<string, unknown>;
@@ -252,8 +266,13 @@ async function main(): Promise<number> {
   }
   const command = args.words[0] as string;
   const sub = args.words[1];
-  const commandKey = (command === 'iron-rules' || command === 'dilemmas' || command === 'daemon') && sub ? `${command} ${sub}` : command;
+  const commandKey = (command === 'iron-rules' || command === 'dilemmas' || command === 'daemon' || command === 'craft') && sub ? `${command} ${sub}` : command;
   const json = has(args, 'json');
+  if (command === 'hook') {
+    // 原样把 hook 之后的参数交给 hook 入口（--event 之类），stdin / stdout 不经过这里的排版
+    const raw = process.argv.slice(process.argv.indexOf('hook') + 1);
+    return hookCliMain(raw, process.stdin, process.stdout, process.stderr);
+  }
   const ctx = resolveContext({
     home: flag(args, 'home'),
     db: flag(args, 'db'),
@@ -325,6 +344,16 @@ async function main(): Promise<number> {
       case 'doctor':
         result = await app.doctor();
         break;
+      case 'craft sync': {
+        const scope = app.scope(scopeArg);
+        if (app.ctx.projectDir === null) throw new UsageError('craft sync 只对项目 / 角色作用域有意义：请加 --project <项目目录>（角色再加 --role <角色名>）；个人库不往任何 Markdown 投影');
+        const craft = projectCraft({ projectDir: app.ctx.projectDir, store: app.store, scope });
+        const brief = has(args, 'brief') ? await refreshBrief({ crewCliPath: process.env.MEMLOOM_CREW_CLI?.trim() || null, projectDir: app.ctx.projectDir }) : null;
+        result = { craft, brief };
+        break;
+      }
+      case 'craft':
+        throw new UsageError('「craft」后面要跟子命令：craft sync [--brief]');
       case 'iron-rules':
       case 'dilemmas':
       case 'daemon':

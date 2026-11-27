@@ -2,7 +2,7 @@
 
 **把 AI Agent 每次干活攒下的零散经历，织成真正管用、人也能一眼看懂的工作原则。**
 
-`memloom`（Memory + Loom）是一套面向 **干活型 AI Agent** 的轻量个人记忆与原则演化引擎。它跟着**你这个人**走，不绑死任何一款特定的 Agent 客户端——无论是 Pi、Claude Code、Codex、Cursor 还是 Antigravity，只要接上它，就能共享同一套“懂你工作习惯和通用避坑直觉”的大脑。
+`memloom`（Memory + Loom）是一套面向 **干活型 AI Agent** 的轻量个人记忆与原则演化引擎。它跟着**你这个人**走，不绑死任何一款特定的 Agent 客户端——目前自带 Pi 的接入胶水；其它支持 MCP / 命令行的 Agent（Codex、Cursor 等）用同一套 MCP / CLI 也能共享“懂你工作习惯和通用避坑直觉”的大脑。
 
 > 配合姐妹项目 [**agent-crew**](https://github.com/Jarcis-cy/agent-crew) 使用，可以把“跟人走的个人大脑”与“跟项目走的动态专家班子”顺畅拼在一起；两者也可以完全独立安装使用。
 
@@ -42,8 +42,8 @@
 
 ### 1. 双区注入：既给模型大幅减负，又不破坏 Prompt Cache
 把“常驻底座”和“中途想起的提醒”拆到两个位置：
-- **静态底座（System Prompt，整场会话一字不动）**：严格控制在 **3,000 字符以内**，只放你的置顶铁律 + 最核心的 5~8 条常驻工作原则。前缀完全稳定，100% 吃满大模型服务商的 Prompt Cache（前缀缓存）。
-- **中途动态提醒（挂在当轮消息尾部，绝不改动 System Prompt 前缀）**：每当你聊到新话题、遇到报错或纠正模型时，本地在几十到几百毫秒内做一次语义检索与精排。**只有高置信度命中时**，才在当轮末尾悄悄附 1~3 行极短大白话提醒（总计 ≤ 400 字）；没强相关命中就保持完全安静，绝不硬凑字数。
+- **静态底座（System Prompt，整场会话一字不动）**：严格控制在 **3,000 字符以内**，只放你的置顶铁律 + 最核心的 5~8 条常驻工作原则。memloom 自己的系统段固定；真实缓存命中取决于宿主 / 模型服务。
+- **中途动态提醒（挂在当轮消息尾部，绝不改动 System Prompt 前缀）**：每当你聊到新话题、遇到报错或纠正模型时，本地做一次有前台预算的语义检索与精排（单次预算到点就静默）。**只有高置信度命中时**，才在当轮末尾悄悄附 1~3 行极短大白话提醒（总计 ≤ 400 字）；没强相关命中就保持完全安静，绝不硬凑字数。
 
 ### 2. 默认本地内存就能跑的轻量语义检索（零 API 强依赖）
 用字面关键词去搜记忆，只要换个同义词就会漏掉；但如果为了语义检索去搭一套 Docker + 向量数据库，又太笨重。
@@ -74,7 +74,7 @@
 ```mermaid
 flowchart TB
     subgraph HOSTS["任意 AI Agent 客户端"]
-        H1["支持 Hook 的宿主<br/>(Pi / Claude Code)"]
+        H1["Pi（扩展进程内常驻）"]
         H2["支持 MCP / CLI 的宿主<br/>(Codex / Cursor / Antigravity 等)"]
     end
 
@@ -125,7 +125,7 @@ memloom/
 │   └── cli/                   # 命令行入口 (memloom)
 ├── adapters/
 │   ├── pi/                    # 极薄 Pi Extension 胶水 (≤ 100 行)
-│   └── claude-code/           # 极薄 Claude Code Hook 胶水
+│   └── (其它宿主走 src/host/ 的通用事件入口，不承诺具体适配)
 ├── tests/                     # 离线单测与中文检索/纠错/自治回归测试
 └── AGENTS.md                  # 给施工 Agent 的项目纪律与验收清单
 ```
@@ -137,7 +137,7 @@ memloom/
 - **M1：核心存储与基础演化内核** — 单文件 SQLite 四表模型、铁律保护、大白话采集/凝结/淘汰与三级冲突自愈、离线测试全绿。
 - **M2：单机共享轻量检索底座** — 跑通本地 0.6B ONNX（INT8/Q4，512 维）+ 闲置卸载、OpenAI 兼容 API 切换、中文 FTS5 兜底及混合精排。
 - **M3：便携打包、MCP 与 CLI** — 完成 `export / import` 无损迁移与秒级向量重建，暴露完整 MCP Server 与 CLI。（已落地，见「本地运行（M3）」）
-- **M4：极薄宿主胶水与实测验收** — 落地 Pi / Claude Code 胶水，验证双区注入不炸 Prompt Cache、中文纠错实时生效、前台注意力税稳定控制在低位。
+- **M4：极薄宿主胶水与实测验收** — 落地宿主无关核心 `src/host/`（静态区 / 动态提醒 / 纠错即时入库 / 后台复盘与抢救 / 分歧通知 / agent-crew 联动）和 Pi 胶水，验证双区注入不炸 Prompt Cache、中文纠错实时生效、前台注意力税稳定控制在低位。（核心与跨仓联动已落地，见「本地运行（M4）」）
 
 ---
 
@@ -339,6 +339,53 @@ memloom daemon status | memloom daemon stop                         # 只探测 
 npm test   # 75 个离线用例：tar / gzip 往返与不可信输入边界、导出 / 导入往返与冲突、真实进程命令行端到端、
            # 回环 OpenAI 兼容端点凝结、官方 SDK 客户端走 stdio 调 MCP；全部用临时库 + 临时目录，不联网、不碰真实记忆
 ```
+
+## 本地运行（M4：宿主无关核心、双区注入与 agent-crew 联动）
+
+M4 把「注入 + 采集 + 调度 + 跨仓联动」写成一层**宿主无关核心** `src/host/`（入口 `dist/src/host/index.js`）：Pi 的扩展在进程内常驻调用它；别的宿主可以用通用子进程入口 `node dist/src/host/hook-cli.js --event`（stdin 一条事件 JSON，stdout 一条回执 JSON，永远退出 0）。适配层只做「取事件 → 调核心 → 把三段文字放到该放的位置」，不写 SQL、检索、提示词、凝结。契约（事件 / 回执字段、放置位置、目录边界）见 memory-rnd 项目档案 `projects/memloom/refs/2026-11-27-m4-host-contract.md`。
+
+### 1. 一条最小闭环（临时目录 + 注入的离线模型，不联网、不碰真实 `~/.memloom`）
+
+```js
+import { HostCore, resolveHostConfig } from './dist/src/host/index.js';
+
+process.env.MEMLOOM_HOME = '/tmp/memloom-m4-demo';           // 状态目录和个人库都落在这里
+const config = resolveHostConfig({}, process.env);           // 个人作用域；项目 / 角色会话给 { project: '<目录>', role: '<角色>' }
+const core = new HostCore(config);                           // 检索器可注入（第二个参数 { retriever }）；不给就按 README M2 的环境变量造
+const start = await core.handle({ type: 'session_start', sessionId: 'pi-会话号' });
+// start.staticBlock：整场固定字节的常驻底座（铁律 + ≤8 条核心 + 一句工具说明，≤3,000 字）；start.dilemmaNotice：分歧短通知（同批一次）
+for (const prompt of prompts) {
+  const turn = await core.handle({ type: 'user_message', sessionId: 'pi-会话号', text: prompt });
+  // turn.hint：当轮尾部提醒（精排分 ≥ 0.72 的 0~3 条，≤400 字；寒暄 / 斜杠 / 无高分就是 ''）
+  // turn.correction：用户强纠错时已立刻入库；turn.background：登记的后台活动（不等它）
+  await core.handle({ type: 'tool_result', sessionId: 'pi-会话号', toolName: 'bash', isError: false, exitCode: 0, output: '…' });
+}
+await core.handle({ type: 'session_end', sessionId: 'pi-会话号' });   // 关会话前抢救最近未覆盖的 ≤20 条
+core.close();
+```
+
+- **静态区**只在 `session_start` 算一次，存进会话临时状态；同一会话（含 Pi 续会话、重载、压缩后的再次 `session_start`）原字节返回，新会话才重算。
+- **动态提醒**：一次提醒（一条用户消息，或一个失败的工具批次）在前台最多等 `MEMLOOM_HINT_BUDGET_MS`（默认 2000 毫秒），候选缩到几条，超时就丢、不补发；没模型 / 冷启动 / 坏模型一律静默，不用字面分冒充语义分。这 2 秒是**单次预算**，不是实时承诺：不承诺供应商的缓存命中率，也不是几十毫秒级的检索。会话开始默认在后台预热共享检索服务（`MEMLOOM_WARMUP=0` 关），宿主进程从不加载 ONNX。本机（16 核、Node 24.15）这一次的温态实测：6 条候选整次召回 1.40~1.63 秒，冷启动 8~13 秒，所以默认预算是 2000 毫秒而不是更低；嫌慢可以调低预算（提醒会更少）——只说明这台机器这一次，不是保证。同一批工具里只想让某一个失败出提醒时，适配层给 `tool_result` 标 `skipHint: true`，核心照常计数和调度、只是不再等检索。
+- **后台活动**（纠错即时凝结、每 10 轮 / 15 次工具调用复盘抽取、压缩 / 关会话前抢救）只在配置了后台模型时才做，同一会话串行、最多 1 跑 1 等；送给后台的对话先去掉 memloom 自己的注入文字。会话内的任务在进程内跑，关会话 / 压缩前的抢救由脱离的短命子进程做（宿主退出也做得完），没有常驻调度服务。
+- **会话快照**在 `<home>/sessions/<会话>.json`（0600，目录 0700），文件名按「库路径 + 作用域 + 会话号」散列，同名的另一个库 / 作用域各存各的：只有静态区文本、计数器、去重键和最近消息片段，没有凭据。关会话（`session_end`）仍当场安排最近窗口的抢救，然后**清掉对话片段**，但保留同一库同一作用域的静态字节 / 去重 / 限频游标——Pi 用 `-c` 续会话、reload 换了进程，同 sessionId 拿回的原字节不变，新会话才读到新铁律；7 天未更新整个清掉。它不是第二份记忆真源——记忆只有 SQLite 四张表。
+- **短命抢救的传参**：关会话 / 压缩前的抢救由脱离的短命子进程（`node hook-cli.js --job`）做，Pi 进程退出也做得完。任务说明只在 `<home>/jobs/` 短暂落盘、子进程读完即删（拉起失败或子进程没读就退出时父进程兜底清掉），里面只有端点、模型名、作用域、路径和要抽取的那段对话；**后台模型的凭据只通过子进程环境变量传，说明文件里永远没有**。
+- **分歧轻声通知**：还没提醒过的 open 分歧 ≥ 3 条或其中有撞铁律的，才在下一新会话开场附两行提示（记一次 `surfaced_count`，同批只一次）；拍板仍走 M3 的 `dilemmas resolve`，核心不替用户决定。
+
+### 2. 和 agent-crew 的单向联动（可选）
+
+- 项目 / 角色会话必须显式给 `MEMLOOM_PROJECT`（含 `.team/manifest.json` 的目录；角色再加 `MEMLOOM_ROLE`，且角色必须已存在），库固定在 `.team/.mind.db`，个人库照旧独立；没有任何把项目内容升格进 personal 的路径。
+- 凝结成功后核心把当前作用域的生效原则投到 `.team/CRAFT.md`（项目）或 `.team/roles/<角色>/CRAFT.md`（角色）的 `<!-- memloom:craft:start/end -->` 管理区：`- ★ <触发场景>：<行动准则>`，常驻核心优先；区外字节原样、手写条目保留，整份不超过 40 条（放不下就少写并报告，不截句）。目标或父级是链接、标记不成对，一个字节不写。也可以手动触发：`memloom craft sync`。
+- `BRIEF.md` 只由 agent-crew 自己的 `crew brief --write` 渲染：`memloom craft sync --brief` 只有在 `MEMLOOM_CREW_CLI` 指向可信的 `crew.mjs`（绝对路径、普通文件）时才用参数数组调它，没有配置就如实提示手动命令。
+
+### 3. 命令行与测试
+
+```bash
+memloom --project <目录> [--role <角色>] craft sync [--brief]   # 投影 CRAFT；--brief 再刷新速览（需要 MEMLOOM_CREW_CLI）
+memloom hook --event                                            # 通用子进程入口：stdin 一条 HostEvent，stdout 一条 HostResponse
+npm test                                                        # 离线全套；M4 新增 tests/host-core.test.ts、tests/host-interop.test.ts、tests/condense-schedule.test.ts
+```
+
+`tests/host-interop.test.ts` 里和真实 agent-crew 的那条用例，默认找本机工作区里的 agent-crew CLI（绝对路径，可用 `MEMLOOM_TEST_CREW_CLI` 改），找不到就跳过；它只在临时项目里建队、加角色、写 CRAFT、刷新速览、`crew check` 和打包，不改 agent-crew 仓。
 
 ## 延伸阅读
 

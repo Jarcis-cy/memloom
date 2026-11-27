@@ -5,7 +5,7 @@
  * - 凭据只留在内存里的 Authorization 头，不进日志、不进报错、不进任何回执。
  * 模型返回的整段内容当不可信数据：这里只负责把它解析成 JSON，所有校验仍在凝结核心里做。
  */
-import type { CondenseContext, CondenseModel } from '../core/types.js';
+import type { CondenseContext, CondenseModel, ExtractionInput, ExtractionModel } from '../core/types.js';
 
 export interface LlmConfig {
   /** 完整前缀，含 /v1，例如 https://api.siliconflow.cn/v1 */
@@ -61,6 +61,52 @@ export function extractJson(text: string): unknown {
   return JSON.parse(candidate.slice(start, end + 1)) as unknown;
 }
 
+/** 两个后台适配共用的一次对话请求：系统提示词 + 一份当数据用的 JSON；返回模型回复里抠出来的 JSON。凭据只在内存里的 Authorization 头。 */
+async function chatJson(
+  config: LlmConfig,
+  apiKey: string | undefined,
+  timeoutMs: number,
+  fetchImpl: typeof fetch,
+  instructions: string,
+  payload: unknown,
+): Promise<unknown> {
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (apiKey) headers.authorization = `Bearer ${apiKey}`;
+  let response: Response;
+  try {
+    response = await fetchImpl(`${config.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: config.model,
+        temperature: 0.1,
+        messages: [
+          { role: 'system', content: instructions },
+          { role: 'user', content: JSON.stringify(payload, null, 1) },
+        ],
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (error) {
+    throw new Error(`连不上后台模型端点：${error instanceof Error ? error.message : String(error)}`);
+  }
+  const text = await response.text();
+  if (!response.ok) throw new Error(`后台模型端点返回 HTTP ${response.status}：${text.replace(/\s+/g, ' ').slice(0, 200)}`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    throw new Error('后台模型端点返回的不是 JSON');
+  }
+  const content = (parsed as { choices?: Array<{ message?: { content?: unknown } }> })?.choices?.[0]?.message?.content;
+  if (typeof content !== 'string') throw new Error('后台模型端点的回复里没有 choices[0].message.content');
+  return extractJson(content);
+}
+
+function modelId(config: LlmConfig): string {
+  return `openai-compatible:${new URL(config.baseUrl).host}:${config.model}`;
+}
+
 export class OpenAiCompatibleCondenseModel implements CondenseModel {
   readonly id: string;
   private readonly apiKey: string | undefined;
@@ -70,51 +116,54 @@ export class OpenAiCompatibleCondenseModel implements CondenseModel {
     private readonly config: LlmConfig,
     private readonly fetchImpl: typeof fetch = fetch,
   ) {
-    this.id = `openai-compatible:${new URL(config.baseUrl).host}:${config.model}`;
+    this.id = modelId(config);
     this.apiKey = config.apiKey;
     this.timeoutMs = config.timeoutMs ?? 120_000;
   }
 
   async plan(input: CondenseContext): Promise<unknown> {
-    const payload = {
+    return chatJson(
+      this.config,
+      this.apiKey,
+      this.timeoutMs,
+      this.fetchImpl,
+      input.instructions,
+      {
+        作用域: input.scope,
+        触发原因: input.reason,
+        待处理经历: input.experiences,
+        现有生效原则: input.principles,
+        置顶铁律: input.ironRules,
+        未解决的分歧: input.openDilemmas,
+        原则池容量: input.capacity,
+      },
+    );
+  }
+}
+
+/**
+ * 后台采集（复盘 / 抢救）用同一个端点、同一个客户端：把最近一段对话交给便宜快速的常规模型，请它按中文提示词挑出值得长期记住的经历。
+ * 只在用户明确配置了后台端点时才会被构造出来；返回的整段当不可信数据，逐条校验在 src/core/capture.ts。
+ */
+export class OpenAiCompatibleExtractionModel implements ExtractionModel {
+  readonly id: string;
+  private readonly apiKey: string | undefined;
+  private readonly timeoutMs: number;
+
+  constructor(
+    private readonly config: LlmConfig,
+    private readonly fetchImpl: typeof fetch = fetch,
+  ) {
+    this.id = modelId(config);
+    this.apiKey = config.apiKey;
+    this.timeoutMs = config.timeoutMs ?? 60_000;
+  }
+
+  async extract(input: ExtractionInput): Promise<unknown> {
+    return chatJson(this.config, this.apiKey, this.timeoutMs, this.fetchImpl, input.instructions, {
       作用域: input.scope,
-      触发原因: input.reason,
-      待处理经历: input.experiences,
-      现有生效原则: input.principles,
-      置顶铁律: input.ironRules,
-      未解决的分歧: input.openDilemmas,
-      原则池容量: input.capacity,
-    };
-    const headers: Record<string, string> = { 'content-type': 'application/json' };
-    if (this.apiKey) headers.authorization = `Bearer ${this.apiKey}`;
-    let response: Response;
-    try {
-      response = await this.fetchImpl(`${this.config.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          model: this.config.model,
-          temperature: 0.1,
-          messages: [
-            { role: 'system', content: input.instructions },
-            { role: 'user', content: JSON.stringify(payload, null, 1) },
-          ],
-        }),
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
-    } catch (error) {
-      throw new Error(`连不上后台模型端点：${error instanceof Error ? error.message : String(error)}`);
-    }
-    const text = await response.text();
-    if (!response.ok) throw new Error(`后台模型端点返回 HTTP ${response.status}：${text.replace(/\s+/g, ' ').slice(0, 200)}`);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text) as unknown;
-    } catch {
-      throw new Error('后台模型端点返回的不是 JSON');
-    }
-    const content = (parsed as { choices?: Array<{ message?: { content?: unknown } }> })?.choices?.[0]?.message?.content;
-    if (typeof content !== 'string') throw new Error('后台模型端点的回复里没有 choices[0].message.content');
-    return extractJson(content);
+      来源会话: input.sessionId,
+      对话记录: input.messages,
+    });
   }
 }

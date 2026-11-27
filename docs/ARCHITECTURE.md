@@ -162,7 +162,7 @@ export interface Retriever {
   - [P12] 递归删除目录前先检查是不是软链接，不要带尾斜杠直接 rm -rf。
   </memory-hint>
   ```
-- 没有任何高分命中时，返回空字符串，**零干扰、零开销**。
+- 没有任何高分命中时，返回空字符串；前台只等单次预算，到点就静默（memloom 自己的系统段固定，真实缓存命中取决于宿主 / 模型服务）。
 
 ---
 
@@ -255,7 +255,7 @@ memloom-personal-20261127.tar.gz
 
 ### 极薄宿主胶水（`adapters/`）
 - `adapters/pi/`（≤ 100 行）：监听 `before_agent_start`（注入静态区 + 当轮尾部动态提醒）、`message_end`（中英文纠错检测）、`turn_end`（定时异步采集）、`session_before_compact / session_shutdown`（抢救采集）。
-- `adapters/claude-code/`：映射对应 Hook（`SessionStart` / `UserPromptSubmit` / `PreCompact` / `Stop`）调用 `memloom` CLI。
+- 其它宿主：通过 `src/host/` 的通用事件入口（`HostCore.handle(HostEvent)` 或子进程 `hook-cli.js --event`）接入，不绑定任何宿主 SDK；M4 只落地 Pi 胶水，不承诺别的具体适配。
 - **硬约束**：`adapters/` 内绝不写数据库 SQL、向量计算、提示词模板或凝结逻辑。
 
 ---
@@ -265,4 +265,4 @@ memloom-personal-20261127.tar.gz
 1. **M1 验收**：SQLite 4 表与 FTS5 触发器完整；`iron_rules` 不可被凝结覆盖；大白话凝结（含 `abstract_merge` / `retire`）和三级冲突自愈全通过离线模拟测试。
 2. **M2 验收**：本地 0.6B ONNX 共享进程跑通（并发 5 个客户端只占 1 份内存、闲置后自动释放）；中文同义句能高分召回；切 API 模式与断网退回 FTS5 均不报错。
 3. **M3 验收**：导出包不含凭据与二进制库；在干净临时目录导入后能自动重建向量并召回原原则；MCP 与 CLI 端到端测试通过。
-4. **M4 验收**：在宿主实测多轮对话——验证静态区 ≤ 3,000 字且字节级稳定（Prompt Cache 不失效）；中途换中文话题或触发报错时动态尾部提醒准确弹出且 ≤ 400 字；中文纠错立即捕获。
+4. **M4 验收**：在 Pi 实测多轮对话——验证静态区 ≤ 3,000 字且 memloom 自己的系统段字节级稳定（真实缓存命中取决于宿主 / 模型服务）；中途换中文话题或触发报错时动态尾部提醒准确弹出且 ≤ 400 字；中文纠错立即捕获。

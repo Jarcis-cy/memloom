@@ -11,3 +11,7 @@ coverage/
 .DS_Store
 *.tar.gz
 *.zip
+
+# 本地模型文件很大，永远不进 Git（用 scripts/fetch-retriever-models.mjs 下到你自己的目录）
+*.onnx
+models/

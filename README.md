@@ -49,7 +49,7 @@
 用字面关键词去搜记忆，只要换个同义词就会漏掉；但如果为了语义检索去搭一套 Docker + 向量数据库，又太笨重。
 
 `memloom` 用 **单文件 SQLite + 单机共享本地轻量检索服务** 兼顾了准度和轻巧：
-- **默认模式（本地 CPU 内存运行）**：托管 `Qwen3-Embedding-0.6B`（512 维）+ `Qwen3-Reranker-0.6B`（INT8 / Q4 量化版）。两个模型同时常驻仅占 **1.2–2.2 GB** 内存，纯 CPU 单轮检索约 **0.2–0.4 秒**；首次检索自动拉起，闲置几分钟自动卸载释放内存。整台机器无论同时开多少会话和子 Agent，内存里永远**只共享这一份模型**。
+- **默认模式（本地 CPU 内存运行）**：托管 `Qwen3-Embedding-0.6B`（512 维）+ `Qwen3-Reranker-0.6B`（INT8 / Q4 量化版）。内存和耗时随机器、线程数和候选条数变化，这里不写承诺数字；一台 16 核 Linux 机器上的实测结果（冷启动、单次召回耗时、常驻内存）见下文「本地运行（M2）」第 5 小节。首次检索自动拉起，**默认完全闲置 10 分钟自动退出释放内存**（自动化测试里把这个时间缩短到 20 秒）。整台机器无论同时开多少会话和子 Agent，内存里永远**只共享这一份模型**。
 - **可选 API 模式**：如果运行在 2–4 GB 内存的小云主机上，改一行配置就能切到任意 OpenAI 兼容的 Embedding / Rerank API，本地零内存占用。
 - **零依赖兜底**：没下载模型或断网时，自动无感退回带中文优化的 SQLite FTS5 全文检索，绝不卡死主流程。
 
@@ -198,6 +198,97 @@ store.close();
 代码在 `src/core/`（`schema` 表结构、`store` 真源、`recall` 字面召回、`capture` 采集、`condense` 凝结）和 `src/prompts/m1.ts`（中文提示词）；测试在 `tests/`。
 
 ---
+
+## 本地运行（M2：单机共享轻量检索）
+
+M2 在 M1 的字面召回之上加了语义层：**用可注入的 `Retriever` 做向量粗排 + M1 字面补位 → 去重精排 → 检索器不可用就退回 FTS**。代码在 `src/retriever/`，入口是 `dist/src/retriever/index.js`。三档模式：
+
+| 模式 | 什么时候用 | 依赖 |
+|---|---|---|
+| `local-onnx`（默认推荐） | 本机 CPU 跑 Qwen3-Embedding-0.6B + Qwen3-Reranker-0.6B；整台机器只共享一份常驻模型 | 可选依赖 `onnxruntime-node` + `@huggingface/tokenizers`，以及你显式下载的公开模型目录 |
+| `api` | 2~4 GB 的小主机；**只有你显式给出 base URL 才启用**，对齐 OpenAI 兼容的 `/v1/embeddings` 和 `/v1/rerank` | 无本地模型，凭据只在内存配置或环境变量里 |
+| `fts-only` | 没模型、断网、服务起不来时的保底：SQLite FTS5 trigram + 参数化短词 | 零依赖 |
+
+### 1. 取模型（人工主动做一次，不会自动联网）
+
+```bash
+# 固定 revision 的公开量化模型，按 Hugging Face 元数据校验 sha256，支持断点续传；总量约 1.8 GiB，不上 3 GiB
+node scripts/fetch-retriever-models.mjs --out ~/.memloom/models
+#   embedding/onnx/model_int8.onnx（约 585 MiB） + reranker/onnx/model_quantized.onnx（约 1163 MiB）
+```
+
+模型目录不进 Git。缺模型目录时 `local-onnx` 的检索器会在 `embed()` 直接报不可用、`health()` 如实说 `fts-only`，混合召回照常给字面结果。
+
+### 2. 共享检索服务是怎么起的
+
+- 客户端（`LocalRetriever`）**从不**在自己进程里加载 ONNX：第一次请求时用 `node daemon.js <状态目录>` 另起一个脱离父进程的服务，监听 `<状态目录>/retriever.sock`（目录 0700、socket 0600，只有当前用户能连）。
+- 并发首启时几个客户端可能各拉起一个服务进程，它们在锁目录 `<状态目录>/retriever.lock/` 里各领一张票（文件名带自己的 pid，票号 = 当前最大票号 + 1，票号最小者独占——文件版的面包店互斥算法），决定谁加载模型；**只有独占成功且监听成功的那个进程才 import ONNX 运行时和模型**，其余的不加载就退出（测试里 5 个客户端并发首启，日志能看到 4 个输家）。别人只会在票的拥有者进程已经死了时清它的票，活着的服务不会被误删锁，也不会有人删它的 socket。
+- 服务**完全闲置 10 分钟**（可配，测试里缩短）且没有在途请求就退出，socket 和锁一起清掉；下一次请求再按需拉起。崩溃后残留的 socket（连不上）会被新服务清掉，活着的服务和它的 socket 绝不动，也绝不杀任何进程。
+- 给 M3 CLI 留的接口：`retriever.status()`（只探测不拉起）、`retriever.warmup()`、`retriever.stop()`（安全停止，在途请求做完就退）。服务协议只有 `embed / rerank / status / stop` 四个方法，没有执行外部命令的入口。
+
+状态目录默认 `~/.memloom`（`MEMLOOM_HOME` 可改），模型目录默认 `<状态目录>/models`。**示例和测试一律显式传临时目录**，不碰真实的 `~/.memloom`。
+
+### 3. 一条最小闭环（临时目录 + 真实本地模型）
+
+```bash
+npm ci --include=dev --no-audit --no-fund   # 可选依赖会一起装；装不上也不影响 fts-only / api 模式编译运行
+npm run build
+```
+
+```js
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { openStore } from './dist/src/core/index.js';
+import { LocalRetriever, hybridRecall, indexVectors, pickHints, formatHintBlock } from './dist/src/retriever/index.js';
+
+const root = mkdtempSync(join(tmpdir(), 'memloom-m2-'));       // 只用临时目录
+const store = openStore(join(root, 'demo.db'));
+store.insertPrinciple({ scope: 'personal', now: new Date().toISOString(),
+  triggerWhen: '当你准备递归删除一个目录的时候',
+  rule: '先检查它是不是软链接，不要带尾斜杠直接 rm -rf，防止顺着链接误删目标目录' });
+
+// 模型目录是上一步下载的；首次检索会自动拉起共享服务（冷启动加载模型要几秒）
+const retriever = new LocalRetriever({ stateDir: join(root, 'state'), modelDir: process.env.MEMLOOM_MODEL_DIR });
+
+console.log(await indexVectors({ store, retriever, scope: 'personal' }));   // 有界补建：每次最多 50 条，分批算
+const result = await hybridRecall({ store, scope: 'personal', query: '递归删文件夹的时候把快捷方式指到的那份也删了', retriever });
+console.log(result.mode);                                                     // { retriever: 'local-onnx', stage: 'full', reranked: true, ... }
+for (const item of result.items.slice(0, 3)) console.log(item.score.toFixed(3), item.text);
+console.log(formatHintBlock(pickHints(result.items)));                       // 只留精排分 ≥ 0.72 的前 2~3 条；没有就返回空字符串
+await retriever.stop('示例收尾');
+store.close();
+```
+
+`MEMLOOM_MODEL_DIR=~/.memloom/models node demo.mjs`。换一句查询就能看到三档的真实差别：`result.mode.stage` 会如实写 `full`（向量 + 字面 + 精排）、`lexical-rerank`、`lexical-only`（没经过模型精排，`pickHints` 返回空，不拿字面分冒充语义分）或 `vector-only`。
+
+### 4. API 模式（显式配置）
+
+```js
+import { ApiRetriever } from './dist/src/retriever/index.js';
+const retriever = new ApiRetriever({
+  baseUrl: 'https://api.siliconflow.cn/v1',            // 必须显式给，含 /v1
+  embedModel: 'Qwen/Qwen3-Embedding-0.6B', rerankModel: 'Qwen/Qwen3-Reranker-0.6B',
+  apiKey: process.env.MEMLOOM_API_KEY,                  // 只放内存；不进 health、日志和报错
+  dimensions: 512,                                      // 作为 dimensions 参数发给服务端并截断
+});
+```
+
+也可以用 `createRetriever(retrieverConfigFromEnv())`：`MEMLOOM_RETRIEVER_MODE=local-onnx|api|fts-only`（不写就是 auto：有本地模型用本地，否则配了 API 用 API，否则 fts-only）、`MEMLOOM_STATE_DIR`、`MEMLOOM_MODEL_DIR`、`MEMLOOM_RETRIEVER_IDLE_MS`、`MEMLOOM_API_BASE_URL`、`MEMLOOM_EMBED_MODEL`、`MEMLOOM_RERANK_MODEL`、`MEMLOOM_EMBED_DIMENSIONS`、`MEMLOOM_API_KEY`。
+
+### 5. 本机实测（Linux x86_64、Node 24.15.0、16 核、AVX2、8 线程；合成中文语料）
+
+- 冷启动到模型就绪约 8~12 秒；之后单条向量化约 0.1 秒，精排一条文档约 0.27 秒，一次召回（12~15 条候选精排）约 3.3~4.5 秒。
+- 双模型常驻 RSS 约 2.5~2.9 GiB（int8 向量模型 585 MiB + 动态 int8 精排模型 1163 MiB，加上 8 个线程的运行时开销）；测试里把闲置时间配成 20 秒，实测约 20.5 秒后进程退出、内存归零，下一次请求重新拉起——**默认配置是 10 分钟**，20 秒只是为了让测试跑得快。
+- 同义句（字面一条都找不到）精排分：0.96 / 0.93 / 0.91；无关反例 ≤ 0.004；技术锚点 `ENOENT` 靠字面补位找回并精排 0.99。
+- **这些只是这台机器这一次的实测，不是 README 开头估算的硬保证**；精排分对查询措辞敏感，短促的关键词式查询（如「编译之后才能测试」）可能只有 0.2~0.3，动态提醒会宁缺毋滥地保持安静。
+
+### 6. 测试
+
+```bash
+npm test                      # 离线全套（含编译）：临时库 + 可注入替身 + 离线替身守护进程的多进程测试 + 回环 API 模拟；不联网、不碰真实记忆
+MEMLOOM_TEST_MODEL_DIR=~/.memloom/models npm run test:real-model   # 人工主动：真实模型 5 客户端并发 / 中文正反例 / 闲置退出（约 80 秒）
+```
 
 ## 延伸阅读
 

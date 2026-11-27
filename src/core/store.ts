@@ -476,6 +476,75 @@ export class Store {
     ).all(scope, pattern, pattern, limit);
     return rows.map(toPrinciple);
   }
+  /* ---------- 向量（M2）：只写 embedding 两列，正文和全文索引都不动 ---------- */
+
+  setPrincipleEmbedding(id: number, embedding: Uint8Array, modelId: string): void {
+    if (!modelId) throw new Error('写向量必须带模型身份');
+    const changes = this.prepare('UPDATE principles SET embedding = ?, embedding_model = ? WHERE id = ?').run(embedding, modelId, id);
+    if (Number(changes.changes) === 0) throw new Error(`找不到编号为 ${id} 的原则`);
+  }
+
+  setExperienceEmbedding(id: number, embedding: Uint8Array, modelId: string): void {
+    if (!modelId) throw new Error('写向量必须带模型身份');
+    const changes = this.prepare('UPDATE experiences SET embedding = ?, embedding_model = ? WHERE id = ?').run(embedding, modelId, id);
+    if (Number(changes.changes) === 0) throw new Error(`找不到编号为 ${id} 的经历`);
+  }
+
+  /**
+   * 需要补建向量的生效原则：没有向量、模型身份不同或字节数和维度对不上的，按编号升序最多 limit 条。
+   * modelId 传空字符串就是全部重建（M3 导入后用）；afterId 用来分页。
+   */
+  listPrinciplesNeedingEmbedding(
+    scope: string,
+    modelId: string,
+    byteLength: number,
+    limit: number,
+    afterId = 0,
+  ): Array<{ id: number; text: string; embeddingModel: string | null }> {
+    assertScope(scope);
+    const rows = this.prepare(
+      `SELECT id, trigger_when, rule, embedding_model FROM principles
+       WHERE scope = ? AND status = 'active' AND id > ?
+         AND (? = '' OR embedding_model IS NOT ? OR embedding IS NULL OR length(embedding) IS NOT ?)
+       ORDER BY id LIMIT ?`,
+    ).all(scope, afterId, modelId, modelId, byteLength, limit);
+    return rows.map((row) => ({
+      id: num(row.id),
+      text: `${text(row.trigger_when)}\n${text(row.rule)}`,
+      embeddingModel: textOrNull(row.embedding_model),
+    }));
+  }
+
+  /** 同上，针对经历（只补最近的，经历是只追加的流水）。 */
+  listExperiencesNeedingEmbedding(
+    scope: string,
+    modelId: string,
+    byteLength: number,
+    limit: number,
+    afterId = 0,
+  ): Array<{ id: number; text: string; embeddingModel: string | null }> {
+    assertScope(scope);
+    const rows = this.prepare(
+      `SELECT id, summary, embedding_model FROM experiences
+       WHERE scope = ? AND id > ?
+         AND (? = '' OR embedding_model IS NOT ? OR embedding IS NULL OR length(embedding) IS NOT ?)
+       ORDER BY id LIMIT ?`,
+    ).all(scope, afterId, modelId, modelId, byteLength, limit);
+    return rows.map((row) => ({
+      id: num(row.id),
+      text: text(row.summary),
+      embeddingModel: textOrNull(row.embedding_model),
+    }));
+  }
+
+  /** 被召回过的经历，按次数降序、最近命中优先（混合召回的「高频经历」候选池）。 */
+  listFrequentExperiences(scope: string, limit: number): ExperienceRow[] {
+    assertScope(scope);
+    const rows = this.prepare(
+      'SELECT * FROM experiences WHERE scope = ? AND hit_count > 0 ORDER BY hit_count DESC, last_hit_at DESC, id DESC LIMIT ?',
+    ).all(scope, limit);
+    return rows.map(toExperience);
+  }
   /* ---------- 分歧 ---------- */
 
   insertDilemma(input: DilemmaInput): DilemmaRow {

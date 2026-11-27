@@ -141,6 +141,64 @@ memloom/
 
 ---
 
+## 本地运行（M1）
+
+M1 只交付核心内核：单文件 SQLite 真源、经历采集、字面召回、凝结与三级冲突自愈。**模型一律通过可注入接口进来**（`CondenseModel` / `ExtractionModel` / `DuplicateJudge`），仓库不自带任何外部模型；召回只有 FTS5 trigram + 参数化 LIKE 的字面检索，没有语义向量，也不冒充语义检索。
+
+```bash
+# 需要 Node.js 24 或更新版本（直接用内建 node:sqlite，运行时零第三方依赖）
+# 按 package-lock.json 原样安装；环境里设了 NODE_ENV=production 时 npm 默认跳过 devDependencies，所以必须带 --include=dev
+npm ci --include=dev --no-audit --no-fund
+#   本机 npm 缓存里已有 typescript / @types/node 时可以加 --offline：npm ci --offline --include=dev --no-audit --no-fund
+#   全新机器没有缓存时不要加 --offline，这一步需要联网装一次
+npm run build   # tsc，产物在 dist/
+npm test        # 先编译，再跑离线测试：只用临时文件库和合成样本，不联网、不调用任何外部模型或 API、不碰真实记忆
+```
+
+一条最小闭环（`dist/src/core/index.js` 即编译后的入口；在仓库根目录运行，只用内存库，不动任何真实记忆）：
+
+```js
+import { openStore, captureCorrection, searchExperiences, condense } from './dist/src/core/index.js';
+
+const store = openStore(':memory:');   // 演示用内存库，关掉就没了；要落盘就显式给一个临时文件路径，同库用 scope 隔离
+const captured = captureCorrection(store, {
+  scope: 'personal', sessionId: 's1', turn: 1,
+  message: '不对，删目录之前先 ls -la 看一眼是不是软链接。',
+});
+if ('skipped' in captured) throw new Error('没有检测到纠错，示例走不下去');
+
+// 召回：只用汉字，靠「软链接」三字窗口就能找回这条经历
+console.log(searchExperiences(store, { scope: 'personal', query: '删目录之前要先看看是不是软链接' })
+  .map((hit) => hit.experience.summary));
+
+// 凝结：模型是注入的，这里是离线模拟（换成你自己的模型适配即可），把这条纠错提成一条带触发场景和行动准则的中文原则
+const model = {
+  id: 'offline-mock',
+  plan: async (ctx) => ctx.experiences.map((e) => ({
+    action: 'add',
+    trigger_when: '当你准备删除一个目录的时候',
+    rule: '先 ls -la 看一眼它是不是软链接，确认后再删，不要带尾斜杠。',
+    rationale: '用户刚刚纠正了直接删的做法',
+    is_core: false,
+    source_experience_ids: [e.id],
+  })),
+};
+const result = await condense({
+  store, scope: 'personal', model,
+  reason: captured.condense.reason,             // 纠错即时入口：一条经历就跑，不用攒满 15 条
+  experienceIds: captured.condense.experienceIds,
+});
+console.log(result.actions);                    // [ { action: 'add', principleId: 1 } ]
+for (const p of store.listPrinciples('personal')) console.log(`${p.triggerWhen}：${p.rule}`);
+store.close();
+```
+
+运行后打印三行：找回的经历总结、`[ { action: 'add', principleId: 1 } ]`、以及那条新原则的「触发场景：行动准则」。
+
+代码在 `src/core/`（`schema` 表结构、`store` 真源、`recall` 字面召回、`capture` 采集、`condense` 凝结）和 `src/prompts/m1.ts`（中文提示词）；测试在 `tests/`。
+
+---
+
 ## 延伸阅读
 
 - 想看完整的数据表设计、接口定义、大白话提示词模板和分步验收标准，请直接阅读 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。

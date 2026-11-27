@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+*.db
+*.db-wal
+*.db-shm
+*.sock
+*.log
+.env
+.env.*
+.DS_Store
+*.tar.gz
+*.zip

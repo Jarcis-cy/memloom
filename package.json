@@ -2,7 +2,11 @@
   "name": "memloom",
   "version": "0.1.0",
   "private": true,
-  "description": "把 AI Agent 干活攒下的零散经历，织成真正管用、人也能一眼看懂的工作原则（M2：单机共享轻量检索底座）",
+  "description": "把 AI Agent 干活攒下的零散经历，织成真正管用、人也能一眼看懂的工作原则（M3：便携归档、命令行与 MCP）",
+  "bin": {
+    "memloom": "dist/src/cli/main.js",
+    "memloom-mcp": "dist/src/mcp/main.js"
+  },
   "type": "module",
   "engines": {
     "node": ">=24"
@@ -19,5 +23,8 @@
   "optionalDependencies": {
     "@huggingface/tokenizers": "0.2.0",
     "onnxruntime-node": "1.31.1"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2"
   }
 }

@@ -339,6 +339,16 @@ export class Store {
     ).run(at, id);
   }
 
+  /** 导入专用：恢复经历被召回的计数和处理时间（正文不动，全文索引照旧）。 */
+  restoreExperienceCounters(id: number, meta: { hitCount: number; lastHitAt: string | null; processedAt: string | null }): void {
+    this.prepare('UPDATE experiences SET hit_count = ?, last_hit_at = ?, processed_at = ? WHERE id = ?').run(
+      Math.max(0, Math.trunc(meta.hitCount)),
+      meta.lastHitAt,
+      meta.processedAt,
+      id,
+    );
+  }
+
   /* ---------- 原则 ---------- */
 
   insertPrinciple(input: PrincipleInput): PrincipleRow {
@@ -371,6 +381,41 @@ export class Store {
   findPrinciple(id: number): PrincipleRow | null {
     const row = this.prepare('SELECT * FROM principles WHERE id = ?').get(id);
     return row ? toPrinciple(row) : null;
+  }
+
+  /** 导入专用：恢复原则的状态、核心标记、统计和各个时间（正文不动）；只给刚插入的那一行用。 */
+  restorePrincipleMeta(
+    id: number,
+    meta: {
+      status: PrincipleStatus;
+      rationale: string | null;
+      isCore: boolean;
+      strength: number;
+      appliedCount: number;
+      violatedCount: number;
+      retireReason: string | null;
+      createdAt: string;
+      updatedAt: string;
+      lastUsedAt: string | null;
+    },
+  ): PrincipleRow {
+    this.prepare(
+      `UPDATE principles SET status = ?, is_core = ?, rationale = ?, strength = ?, applied_count = ?, violated_count = ?, retire_reason = ?,
+         created_at = ?, updated_at = ?, last_used_at = ? WHERE id = ?`,
+    ).run(
+      meta.status,
+      meta.isCore ? 1 : 0,
+      meta.rationale,
+      Math.max(0, meta.strength),
+      Math.max(0, Math.trunc(meta.appliedCount)),
+      Math.max(0, Math.trunc(meta.violatedCount)),
+      meta.retireReason,
+      meta.createdAt,
+      meta.updatedAt,
+      meta.lastUsedAt,
+      id,
+    );
+    return this.getPrinciple(id);
   }
 
   listPrinciples(
@@ -581,6 +626,19 @@ export class Store {
         ? this.prepare('SELECT * FROM dilemmas WHERE scope = ? ORDER BY id').all(scope)
         : this.prepare('SELECT * FROM dilemmas WHERE scope = ? AND status = ? ORDER BY id').all(scope, status);
     return rows.map(toDilemma);
+  }
+
+  /** 用户明确拍板后写回：只改状态、结论和时间；已解决的不再改（要改就重新登记一条新的分歧）。 */
+  setDilemmaResolution(id: number, resolution: { status: 'resolved' | 'dismissed'; note: string; resolvedAt: string }): DilemmaRow {
+    const current = this.getDilemma(id);
+    if (current.status !== 'open') throw new Error(`分歧 #${id} 已经是「${current.status}」，不能再次处理`);
+    this.prepare('UPDATE dilemmas SET status = ?, resolution = ?, resolved_at = ? WHERE id = ?').run(
+      resolution.status,
+      resolution.note,
+      resolution.resolvedAt,
+      id,
+    );
+    return this.getDilemma(id);
   }
 }
 

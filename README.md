@@ -136,7 +136,7 @@ memloom/
 
 - **M1：核心存储与基础演化内核** — 单文件 SQLite 四表模型、铁律保护、大白话采集/凝结/淘汰与三级冲突自愈、离线测试全绿。
 - **M2：单机共享轻量检索底座** — 跑通本地 0.6B ONNX（INT8/Q4，512 维）+ 闲置卸载、OpenAI 兼容 API 切换、中文 FTS5 兜底及混合精排。
-- **M3：便携打包、MCP 与 CLI** — 完成 `export / import` 无损迁移与秒级向量重建，暴露完整 MCP Server 与 CLI。
+- **M3：便携打包、MCP 与 CLI** — 完成 `export / import` 无损迁移与秒级向量重建，暴露完整 MCP Server 与 CLI。（已落地，见「本地运行（M3）」）
 - **M4：极薄宿主胶水与实测验收** — 落地 Pi / Claude Code 胶水，验证双区注入不炸 Prompt Cache、中文纠错实时生效、前台注意力税稳定控制在低位。
 
 ---
@@ -288,6 +288,56 @@ const retriever = new ApiRetriever({
 ```bash
 npm test                      # 离线全套（含编译）：临时库 + 可注入替身 + 离线替身守护进程的多进程测试 + 回环 API 模拟；不联网、不碰真实记忆
 MEMLOOM_TEST_MODEL_DIR=~/.memloom/models npm run test:real-model   # 人工主动：真实模型 5 客户端并发 / 中文正反例 / 闲置退出（约 80 秒）
+```
+
+## 本地运行（M3：便携归档、命令行与 MCP）
+
+M3 在内核和检索底座之上加了三个薄层：`src/portable/`（`.tar.gz` 导出 / 导入）、`src/app/`（命令行和 MCP 共用的一层业务胶水）、`src/cli/` 与 `src/mcp/`（两个入口，不重复业务）。编译后 `dist/src/cli/main.js` 就是 `memloom` 命令，`dist/src/mcp/main.js` 就是 MCP 服务（`package.json` 的 `bin` 已登记，`npm link` 后可直接用 `memloom` / `memloom-mcp`）。
+
+### 1. 命令行：一条最小闭环（全程临时目录，不碰真实的 `~/.memloom`）
+
+```bash
+npm run build
+export MEMLOOM_HOME=$(mktemp -d)            # 状态目录和默认库都落在这里；测试和示例都这么隔离
+memloom --db $MEMLOOM_HOME/a.db capture --kind correction --summary "删目录之前先 ls -la 看一眼是不是软链接，确认后再删。"
+memloom --db $MEMLOOM_HOME/a.db capture --message "不对，不要带尾斜杠直接 rm -rf。" --session s1 --turn 3   # 按原话检测纠错
+memloom --db $MEMLOOM_HOME/a.db iron-rules add "没有明说怎么处理就不许擅自动手改用户的项目文件。"
+memloom --db $MEMLOOM_HOME/a.db recall 软链接                       # 没模型时如实写 fts-only / lexical-only
+memloom --db $MEMLOOM_HOME/a.db export --out $MEMLOOM_HOME/personal.tar.gz
+memloom --db $MEMLOOM_HOME/b.db import $MEMLOOM_HOME/personal.tar.gz   # 新库导入；有模型时自动重建向量，没有就明说
+memloom --db $MEMLOOM_HOME/b.db recall 软链接
+memloom --db $MEMLOOM_HOME/b.db doctor                              # 配置、库完整性、容量、检索档位、服务状态；不启动模型
+memloom daemon status | memloom daemon stop                         # 只探测 / 安全停止共享检索服务
+```
+
+命令与规格 §8 一一对应：`recall` / `capture` / `iron-rules list|add|disable` / `dilemmas list|resolve` / `concresce` / `export` / `import` / `daemon status|stop` / `doctor`；`--json` 输出原始数据。退出码：0 正常，1 用法错或失败，2「没配置后台模型」这类什么都没做的情况。通用参数：`--home`（默认 `~/.memloom`，也可用 `MEMLOOM_HOME`）、`--db`（个人库默认 `<home>/personal.db`）、`--project <目录>`（读 `.team/manifest.json` 的 `project_id`，库在 `.team/.mind.db`，作用域 `project:<id>`）、`--role <名字>`（只在指定了项目时有效）、`--state-dir`、`--scope`。个人库只认 `personal`，项目库只认本项目和它的角色，别的组合直接拒绝。
+
+- **分歧只能由人拍板**：`dilemmas resolve <编号> --choice A|B --confirm <编号>`，肯定标志必须等于分歧编号；A 保留现有原则、什么都不改；B 必须由用户逐字段给出 `--target <关联原则编号> --trigger … --rule … [--rationale …] [--core]`，按凝结核心同一套规则校验（长度、中文、去重、容量），新原则接替目标、旧条目标为已被替代留底；不接受一段自由文本，同一条分歧不执行第二次，不能跨作用域。
+- **后台凝结**：`concresce` 需要 `MEMLOOM_LLM_BASE_URL`（任意 OpenAI 兼容端点，含 `/v1`）和 `MEMLOOM_LLM_MODEL`，凭据 `MEMLOOM_LLM_API_KEY` 只留在内存里的 Authorization 头。没配置时直接说明并退出 2，不会调用任何默认服务；配置了就意味着凝结时会把待处理经历、现有原则和铁律发给这个端点（`doctor` 会写明）。模型回复整段当不可信数据，仍由 `src/core/condense.ts` 整体校验后才落库。
+
+### 2. 归档格式（规格 §7）与安全边界
+
+`memloom-<scope>-<日期>.tar.gz` 只装纯文本：`manifest.json`（`schema_version` / `scope` / `exported_at` / `counts` / 每个成员的 SHA-256 / 掩蔽与排除清单）、`iron_rules.json`（含启用状态）、`principles.json`（全部原则，含状态、血缘、统计、时间）、`experiences.jsonl`（精选经历：被原则引用的全部 + 待处理的全部 + 最近 30 条 + 高命中 20 条，封顶 500）、`readable/STANDING.md` 与 `readable/PRINCIPLES.md`；项目域另带 `team/`（`.team` 下的 `.md/.json/.txt/.yaml/.yml/.csv`）。没有 SQLite、向量字节、缓存和模型；自己写的包 `tar -tzf` 能原样列出。tar 读写是自己实现的最小 ustar 版本（`src/portable/tar.ts`，`node:zlib` 做 gzip，零依赖）：只认普通文件和目录项，符号链接、硬链接、设备、管道、PAX / GNU 扩展头、base-256 一律拒绝；gzip 解压带输出上限；成员路径不许绝对路径、`..`、反斜杠、控制字符。
+
+导入的顺序是「先全部校验，再一个事务写库」：gzip 上限 → tar 成员 → 成员集合（只允许上面这些 + `team/`）→ manifest 版本 → 每个成员 SHA-256 → 数量 → 记录字段（多一个字段都算坏包）→ 包内重复；任何一步不对整包拒收、一个字节不写。
+
+- **凭据**：`.team` 里像凭据的文件名（`.env*`、`*.pem`、`*.key`、`*.db`、`*.lock`、`*.onnx`、`id_rsa*`、`.npmrc`、`.netrc` 等）和 `.git/`、`node_modules/`、`models/` 不打包；记录字段（铁律、原则、经历、team 文本）里能明确判断的常见凭据（`sk-…`、`ghp_…`、`AKIA…`、`xox?-*`、JWT、`Bearer …`、`hf_…`、`npm_…`、网址里的账号密码、`api_key=` 这类键值、PEM 私钥块）换成 `[已掩蔽:类型]` 并登记在 `manifest.masked`，导入时再兜一次底。**memloom 不能保证识别所有秘密**（不认识的令牌、口令、内网地址会原样保留），导出后请人手目检。
+- **读端只拒重复编号和无效结构，不拒「两个合法编号、内容相同」的记录**（产品自己导出的包必须能读回）。导入时的「同一条」按稳定身份认：经历 = 类别 + 总结 + 引文 + 来源会话 + 发生时间（同总结但引文 / 类别 / 会话不同的经历是不同证据，各自保留）；铁律 = 正文 + 启停状态：恢复到空库时同文的停用版和生效版各还原一条、同文同状态去重；合并到已有库时本地已有同文的绝不改、也不另插一条同文生效的去绕过本地明确停用，优先对应同状态那条，否则跳过并把差异写进 `iron_rules.state_conflicts`）；原则 = 正文 + 状态（历史版本再带创建时间，同文的生效版和历史版不折叠、血缘不自指；本地已淘汰 / 替代的同文原则不被归档里的生效版复活，列进 `conflicts`）。
+- **跨库编号**：包里用 `iron:N` / `p:N` / `exp:N` 记源库编号，导入时按本次内容翻译成本地编号；包里没带上的引用显式省略并计数，说明文字里的「原则 #N」也一起翻译，绝不留下指向别人同号记录的裸编号。
+- **merge（默认）**：按内容指纹（和凝结核心同一套归一化）去重，重复导入零新增；文字一样只补血缘，不改本地文本、强度和状态；字面接近但内容不同、或状态不同的，不导入并列在回执 `conflicts` 里（本地文本和归档文本都给出），由人决定；可注入的语义判断（`judge`，`src/portable/import.ts`）认出同义时合并到本地那条，返回不可信编号就整包不导。铁律只补缺，从不改本地已有（文本和启用状态都不动）。
+- **replace（显式 `--mode replace`）**：在 merge 之上，把目标作用域里「包里没有的生效原则」软退役留底（写明原因）；别的作用域、铁律、手写文件照旧不动。
+- **`.team` 文件**：只属于 `project:<id>` 归档，角色 / 个人归档绝不带也不写；项目 / 角色归档的 manifest 带 `project_id`，导入只认同一个项目（另一个项目的同名角色直接拒绝）。数据库提交后写入 `<项目>/.team/`，从 `.team` 到目标逐级拒绝符号链接和非普通文件（不写、不比较、不顺着走），只写目标里不存在的；每个文件的新写 / 一致 / 冲突 / 没能写（原因）分别回报。`--project` 入口遇到 `.team`、`manifest.json` 或库文件是符号链接也直接拒绝。
+- **事务与后置步骤分开报**：写库在一个 `BEGIN IMMEDIATE` 事务里，容量硬上限在事务内复核，中途失败整体回滚。纯配置问题（例如只给了 `MEMLOOM_API_BASE_URL` 没给模型名）在落库前就拒绝，此时什么都没写。事务提交后回执带 `committed: true`，三个后置步骤（`.team` 文本、向量重建、可读快照）各自报告成功 / 正常退化（没配向量模型）/ 失败（原因 + 重试），`post_failures` 计数；失败时命令行先用非零退出并写明「数据库已提交，不是回滚」，MCP 标 `isError` 但回执结构照给。重试办法都是重新导入同一个包（重复导入不产生重复记录，只补做没完成的后置步骤）。分歧拍板同理：A / B 落库后快照或向量失败不会让人再拍一次。可读快照写到 `<home>/readable/<作用域>/`（角色带项目编号：`readable/project-<id>/role-<名字>/`），不写进项目目录（项目联动写视图留给 M4）。
+
+### 3. MCP（stdio）
+
+任意支持 MCP 的客户端这样配：命令 `node`，参数 `dist/src/mcp/main.js`（或 `memloom-mcp`），环境变量同命令行（`MEMLOOM_HOME` / `MEMLOOM_DB` / `MEMLOOM_PROJECT` / `MEMLOOM_ROLE` / 检索配置 / 后台模型配置）。工具与命令行一一对应、共用同一层：`memloom_recall`、`memloom_capture`、`memloom_iron_rules`、`memloom_dilemmas`、`memloom_concresce`、`memloom_export`、`memloom_import`，外加兼容入口 `memloom_resolve_dilemma`（等同 `memloom_dilemmas` 的 resolve，同样要求 `choice` + `confirm=分歧编号`）。stdout 只走 MCP 协议，诊断只写 stderr；工具参数里的 `scope` 只能用当前库该管的作用域。
+
+### 4. 测试
+
+```bash
+npm test   # 75 个离线用例：tar / gzip 往返与不可信输入边界、导出 / 导入往返与冲突、真实进程命令行端到端、
+           # 回环 OpenAI 兼容端点凝结、官方 SDK 客户端走 stdio 调 MCP；全部用临时库 + 临时目录，不联网、不碰真实记忆
 ```
 
 ## 延伸阅读

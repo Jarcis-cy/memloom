@@ -123,7 +123,7 @@ pi -e /path/to/memloom/adapters/pi/index.ts     # 只多加一个 -e；不装全
 任何支持 MCP 的客户端这样配：命令 `node`，参数 `/path/to/memloom/dist/src/mcp/main.js`（或 `npm link` 后的 `memloom-mcp`），环境变量同命令行（`MEMLOOM_HOME` 等）。工具与命令行一一对应：`memloom_recall`、`memloom_capture`、`memloom_iron_rules`、`memloom_dilemmas`、`memloom_concresce`、`memloom_export`、`memloom_import`，外加兼容入口 `memloom_resolve_dilemma`。
 
 - 分歧只能由人拍板：`resolve` 必须 `choice` + `confirm=分歧编号`，同一条不执行第二次。
-- `concresce` 需要你显式配置后台模型（`MEMLOOM_LLM_BASE_URL` / `MEMLOOM_LLM_MODEL`，凭据 `MEMLOOM_LLM_API_KEY` 只在内存）；没配置就明确拒绝，不调用任何默认服务。
+- `concresce` 需要你显式配置后台模型（`MEMLOOM_LLM_BASE_URL` / `MEMLOOM_LLM_MODEL`，凭据 `MEMLOOM_LLM_API_KEY` 只在内存；可选 `MEMLOOM_LLM_REASONING_EFFORT` 与 `MEMLOOM_LLM_THINKING_FORMAT`）；推荐写在 `~/.config/memloom/env` 里供 CLI / MCP / 宿主扩展共用（显式环境变量优先），没配置就明确拒绝，不调用任何默认服务。
 - 不支持 MCP 的宿主可以用 `memloom hook --event` 子进程入口接同一套核心。
 
 ---

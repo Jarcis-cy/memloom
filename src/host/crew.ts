@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import { closeSync, existsSync, lstatSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { resolveContext, UsageError } from '../app/context.js';
+import { resolveMemloomEnv } from '../app/env.js';
 import { llmConfigFromEnv } from '../app/llm.js';
 import { retrieverConfigFromEnv, type RetrieverConfig } from '../retriever/index.js';
 import type { Store } from '../core/store.js';
@@ -54,7 +55,8 @@ export function assertCrewRole(projectDir: string, role: string): void {
  * 宿主配置：沿用命令行同一套（MEMLOOM_HOME / MEMLOOM_DB / MEMLOOM_PROJECT / MEMLOOM_ROLE / 检索 / 后台模型），
  * 再加提醒预算、预热开关、可信 agent-crew CLI 路径。项目 / 角色必须显式给出；不从 cwd 猜。
  */
-export function resolveHostConfig(flags: HostFlags, env: NodeJS.ProcessEnv): HostConfig {
+export function resolveHostConfig(flags: HostFlags, rawEnv: NodeJS.ProcessEnv = process.env): HostConfig {
+  const env = resolveMemloomEnv(rawEnv);
   const ctx = resolveContext(flags, env);
   if (ctx.roleName !== null && ctx.projectDir !== null) assertCrewRole(ctx.projectDir, ctx.roleName);
   const budget = Number(env.MEMLOOM_HINT_BUDGET_MS);

@@ -5,6 +5,7 @@
  * 退出码：0 正常；1 用法错或失败；2 「没配置后台模型」这类什么都没做的情况。
  */
 import { resolveContext } from '../app/context.js';
+import { loadMemloomEnv } from '../app/env.js';
 import { Memloom, NotConfiguredError, UsageError } from '../app/ops.js';
 import { projectCraft, refreshBrief, trustedCrewCli } from '../host/crew.js';
 import { hookCliMain } from '../host/hook-cli.js';
@@ -42,7 +43,8 @@ const USAGE = `memloom —— 把 AI Agent 干活攒下的经历织成工作原�
 通用参数：--home <目录>（默认 ~/.memloom）、--db <库文件>、--project <项目目录>、--role <角色名>、
           --state-dir <状态目录>、--scope <作用域>、--json（按 JSON 输出）
 环境变量：MEMLOOM_HOME / MEMLOOM_DB / MEMLOOM_PROJECT / MEMLOOM_ROLE / MEMLOOM_STATE_DIR / MEMLOOM_SCOPE、
-          检索配置见 docs/USAGE.md、后台模型 MEMLOOM_LLM_BASE_URL / MEMLOOM_LLM_MODEL / MEMLOOM_LLM_API_KEY、
+          默认自动读取 ~/.config/memloom/env（可用 MEMLOOM_ENV_FILE 指定或 MEMLOOM_NO_ENV_FILE=1 关闭；进程环境变量始终优先）、
+          检索配置见 docs/USAGE.md、后台模型 MEMLOOM_LLM_BASE_URL / MEMLOOM_LLM_MODEL / MEMLOOM_LLM_API_KEY / MEMLOOM_LLM_REASONING_EFFORT / MEMLOOM_LLM_THINKING_FORMAT、
           模型自动下载 MEMLOOM_AUTO_DOWNLOAD=0（关闭）/ MEMLOOM_HF_ENDPOINT（镜像源）
 `;
 
@@ -293,6 +295,16 @@ function render(command: string, result: unknown): string {
               : '没有在运行（下一次检索会按需自动拉起）';
       out.push(`共享检索服务：${daemonText}`);
       out.push(`后台模型：${llm.configured ? `已配置 → ${String(llm.endpoint)}。${String(llm.notice)}` : String(llm.notice)}`);
+      if (r.env_file) {
+        const envFile = r.env_file as { path: string | null; loaded: boolean; disabled: boolean; keys: number };
+        out.push(
+          envFile.disabled
+            ? '配置文件：已禁用（MEMLOOM_NO_ENV_FILE=1）'
+            : envFile.loaded
+              ? `配置文件：已加载 ${String(envFile.path)}（生效 ${String(envFile.keys)} 项，进程环境变量优先）`
+              : `配置文件：未发现 ${String(envFile.path)}（按需创建即可）`,
+        );
+      }
       out.push(`状态目录 ${String(r.state_dir)}，home ${String(r.home)}`);
       return out.join('\n');
     }
@@ -316,15 +328,23 @@ async function main(): Promise<number> {
     const raw = process.argv.slice(process.argv.indexOf('hook') + 1);
     return hookCliMain(raw, process.stdin, process.stdout, process.stderr);
   }
+  let loadedEnv: ReturnType<typeof loadMemloomEnv>;
+  try {
+    loadedEnv = loadMemloomEnv(process.env);
+  } catch (error) {
+    process.stderr.write(`出错：${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
+  const { env, file: envFile } = loadedEnv;
   const ctx = resolveContext({
     home: flag(args, 'home'),
     db: flag(args, 'db'),
     project: flag(args, 'project'),
     role: flag(args, 'role'),
     stateDir: flag(args, 'state-dir'),
-  });
-  const scopeArg = flag(args, 'scope') ?? process.env.MEMLOOM_SCOPE;
-  const app = new Memloom(ctx);
+  }, env);
+  const scopeArg = flag(args, 'scope') ?? env.MEMLOOM_SCOPE;
+  const app = new Memloom(ctx, { env, envFile });
   try {
     let result: unknown;
     switch (commandKey) {
@@ -384,19 +404,19 @@ async function main(): Promise<number> {
         const config = app.retrieverConfig();
         const auto = autoDownloadOf(config);
         result = modelDownloadStatus({ // 和 models download 同一口径：--out > MEMLOOM_MODEL_DIR > <状态目录>/models
-          modelDir: flag(args, 'out') ?? process.env.MEMLOOM_MODEL_DIR ?? defaultModelDir(ctx.stateDir),
-          stateDir: ctx.stateDir, mirror: flag(args, 'mirror'), autoDownload: auto.enabled, autoDownloadNote: auto.note });
+          modelDir: flag(args, 'out') ?? env.MEMLOOM_MODEL_DIR ?? defaultModelDir(ctx.stateDir),
+          stateDir: ctx.stateDir, env, mirror: flag(args, 'mirror'), autoDownload: auto.enabled, autoDownloadNote: auto.note });
         break;
       }
       case 'models download': {
         const mirror = flag(args, 'mirror');
-        const modelDir = flag(args, 'out') ?? process.env.MEMLOOM_MODEL_DIR ?? defaultModelDir(ctx.stateDir);
-        const endpoint = resolveEndpoint(process.env, mirror);
+        const modelDir = flag(args, 'out') ?? env.MEMLOOM_MODEL_DIR ?? defaultModelDir(ctx.stateDir);
+        const endpoint = resolveEndpoint(env, mirror);
         const embedding = flag(args, 'embedding');
         const reranker = flag(args, 'reranker');
         if (has(args, 'background')) {
           // 前台不等网络：写明状态就退出，下载在脱离的子进程里跑
-          const spawned = spawnBackgroundDownload({ stateDir: ctx.stateDir, modelDir, endpoint, embedding, reranker });
+          const spawned = spawnBackgroundDownload({ stateDir: ctx.stateDir, modelDir, endpoint, embedding, reranker, env });
           if (spawned.pid === null) throw new UsageError(spawned.reason);
           result = { action: 'download', background: true, pid: spawned.pid, model_dir: modelDir, state_dir: ctx.stateDir, endpoint, embedding: embedding ?? null, reranker: reranker ?? null };
           break;
@@ -434,7 +454,7 @@ async function main(): Promise<number> {
         const scope = app.scope(scopeArg);
         if (app.ctx.projectDir === null) throw new UsageError('craft sync 只对项目 / 角色作用域有意义：请加 --project <项目目录>（角色再加 --role <角色名>）；个人库不往任何 Markdown 投影');
         const craft = projectCraft({ projectDir: app.ctx.projectDir, store: app.store, scope });
-        const brief = has(args, 'brief') ? await refreshBrief({ crewCliPath: process.env.MEMLOOM_CREW_CLI?.trim() || null, projectDir: app.ctx.projectDir }) : null;
+        const brief = has(args, 'brief') ? await refreshBrief({ crewCliPath: env.MEMLOOM_CREW_CLI?.trim() || null, projectDir: app.ctx.projectDir }) : null;
         result = { craft, brief };
         break;
       }

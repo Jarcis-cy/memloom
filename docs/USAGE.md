@@ -52,7 +52,8 @@ npm test        # 先编译，再跑离线测试：只用临时文件库和合�
 | `MEMLOOM_API_BASE_URL`、`MEMLOOM_EMBED_MODEL`、`MEMLOOM_RERANK_MODEL`、`MEMLOOM_EMBED_DIMENSIONS`、`MEMLOOM_API_KEY` | API 模式；`api` 模式下前三个必填。凭据只在内存，不进 health、日志和报错 |
 | `MEMLOOM_AUTO_DOWNLOAD` | `0` = 关闭自动下载：缺模型也永远只用字面检索，不联网 |
 | `MEMLOOM_HF_ENDPOINT` / `HF_ENDPOINT` | 模型镜像源（命令行 `--mirror` 优先） |
-| `MEMLOOM_LLM_BASE_URL`、`MEMLOOM_LLM_MODEL`、`MEMLOOM_LLM_API_KEY` | 后台凝结模型：任意 OpenAI 兼容端点（含 `/v1`） |
+| `MEMLOOM_ENV_FILE`、`MEMLOOM_NO_ENV_FILE` | 默认自动读取 `~/.config/memloom/env`（遵循 `$XDG_CONFIG_HOME/memloom/env`，只导入 `MEMLOOM_*` 和 `HF_ENDPOINT`，拒绝符号链接；进程里显式传入的变量永远优先）。`MEMLOOM_ENV_FILE` 可改路径，`MEMLOOM_NO_ENV_FILE=1` 关闭读取 |
+| `MEMLOOM_LLM_BASE_URL`、`MEMLOOM_LLM_MODEL`、`MEMLOOM_LLM_API_KEY`、`MEMLOOM_LLM_REASONING_EFFORT`、`MEMLOOM_LLM_THINKING_FORMAT`、`MEMLOOM_LLM_TIMEOUT_MS` | 后台凝结模型：任意 OpenAI 兼容端点（含 `/v1`）。可选思考强度（如 `low` / `high` / `max`）与格式（`openai` 默认，或 `deepseek` 同时带 `thinking: { type: "enabled" }`），以及毫秒级超时（1000~600000） |
 | `MEMLOOM_HINT_BUDGET_MS`、`MEMLOOM_HINT_THRESHOLD`、`MEMLOOM_WARMUP`、`MEMLOOM_CREW_CLI` | 宿主专用：提醒的前台预算（默认 2000）、提醒门槛（默认 0.72）、`0` = 不预热、可信的 agent-crew CLI 路径。详见 HOST-CONTRACT |
 | `MEMLOOM_HOST_ENTRY` | Pi 适配专用：核心入口的 file URL，默认 `<仓库>/dist/src/host/index.js` |
 | `MEMLOOM_TEST_MODEL_DIR`、`MEMLOOM_TEST_CREW_CLI` | 只给测试用：真实模型目录、真实 agent-crew `crew.mjs` 的绝对路径 |
@@ -173,7 +174,7 @@ memloom daemon status | memloom daemon stop                         # 只探测 
 
 - **分歧只能由人拍板**：`dilemmas resolve <编号> --choice A|B --confirm <编号>`，肯定标志必须等于分歧编号；A 保留现有原则、什么都不改；B 必须由用户逐字段给出 `--target <关联原则编号> --trigger … --rule … [--rationale …] [--core]`，按凝结核心同一套规则校验（长度、中文、去重、容量），新原则接替目标、旧条目标为已被替代留底；不接受一段自由文本，同一条分歧不执行第二次，不能跨作用域。
 - **拍板落库之后**：A / B 都先在一个事务里落库（回执 `committed: true`），然后才做后置步骤——B 补建向量（没模型只是正常退化）、两者都刷新可读快照。后置步骤失败时命令行用非零退出，回执先写明「已落库，不是回滚」，**不用再拍一次板，也不用重新导入**：按回执里的报错处理（快照目录写不了就修目录权限，修好后之后的导入或分歧拍板会重新生成快照），想看整体状态运行 `memloom doctor`（检索档位、本地模型、缺向量的条数）。没建上向量的条目召回时只按字面找。
-- **后台凝结**：`concresce` 需要 `MEMLOOM_LLM_BASE_URL`（任意 OpenAI 兼容端点，含 `/v1`）和 `MEMLOOM_LLM_MODEL`，凭据 `MEMLOOM_LLM_API_KEY` 只留在内存里的 Authorization 头。没配置时直接说明并退出 2，不会调用任何默认服务；配置了就意味着凝结时会把待处理经历、现有原则和铁律发给这个端点（`doctor` 会写明）。模型回复整段当不可信数据，仍由 `src/core/condense.ts` 整体校验后才落库。
+- **后台凝结**：`concresce` 需要 `MEMLOOM_LLM_BASE_URL`（任意 OpenAI 兼容端点，含 `/v1`）和 `MEMLOOM_LLM_MODEL`，凭据 `MEMLOOM_LLM_API_KEY` 只留在内存里的 Authorization 头；需要开启思考模式时可加 `MEMLOOM_LLM_REASONING_EFFORT`（如 `high` / `max`）和 `MEMLOOM_LLM_THINKING_FORMAT`（`openai` 或 `deepseek`）。这些配置推荐放进 `~/.config/memloom/env`（权限设为 `600`），命令行、MCP 和宿主扩展会自动读取且不覆盖显式传入的环境变量。没配置时直接说明并退出 2，不会调用任何默认服务；配置了就意味着凝结时会把待处理经历、现有原则和铁律发给这个端点（`doctor` 会写明）。模型回复整段当不可信数据，仍由 `src/core/condense.ts` 整体校验后才落库。
 
 ### 4.2 归档格式（规格 §7）与安全边界
 

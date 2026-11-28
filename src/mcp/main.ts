@@ -9,6 +9,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { resolveContext } from '../app/context.js';
+import { loadMemloomEnv } from '../app/env.js';
 import { Memloom, NotConfiguredError, UsageError } from '../app/ops.js';
 
 const SERVER_INFO = { name: 'memloom', version: '0.1.0' };
@@ -184,7 +185,8 @@ function textResult(value: unknown): CallToolResult {
 }
 
 async function main(): Promise<void> {
-  const app = new Memloom(resolveContext({}));
+  const { env, file: envFile } = loadMemloomEnv(process.env);
+  const app = new Memloom(resolveContext({}, env), { env, envFile });
   const specs = tools();
   const server = new Server(SERVER_INFO, { capabilities: { tools: {} }, instructions: INSTRUCTIONS });
   server.onerror = (error) => process.stderr.write(`memloom-mcp：${error.message}\n`);

@@ -7,11 +7,17 @@
  */
 import type { CondenseContext, CondenseModel, ExtractionInput, ExtractionModel } from '../core/types.js';
 
+export type LlmThinkingFormat = 'openai' | 'deepseek';
+
 export interface LlmConfig {
   /** 完整前缀，含 /v1，例如 https://api.siliconflow.cn/v1 */
   baseUrl: string;
   model: string;
   apiKey?: string;
+  /** 思考强度（如 low / medium / high / max / off / none）；不设就不传思考参数 */
+  reasoningEffort?: string;
+  /** 思考参数格式：openai（默认，传 reasoning_effort）或 deepseek（传 thinking + reasoning_effort） */
+  thinkingFormat?: LlmThinkingFormat;
   timeoutMs?: number;
 }
 
@@ -22,13 +28,27 @@ export class LlmConfigError extends Error {
   }
 }
 
-/** 三个变量一个都没设 = 没配置（返回 null）；设了一部分 = 配置错误，直接说清楚缺什么。 */
+const REASONING_EFFORT_RE = /^[a-zA-Z0-9_-]{1,32}$/;
+
+/** 相关变量一个都没设 = 没配置（返回 null）；设了一部分 = 配置错误，直接说清楚缺什么。 */
 export function llmConfigFromEnv(env: NodeJS.ProcessEnv): LlmConfig | null {
   const baseUrl = env.MEMLOOM_LLM_BASE_URL?.trim() ?? '';
   const model = env.MEMLOOM_LLM_MODEL?.trim() ?? '';
   const apiKey = env.MEMLOOM_LLM_API_KEY?.trim() ?? '';
-  if (baseUrl === '' && model === '' && apiKey === '') return null;
-  if (baseUrl === '') throw new LlmConfigError('后台模型配置不完整：设了 MEMLOOM_LLM_MODEL 或 MEMLOOM_LLM_API_KEY，却没有 MEMLOOM_LLM_BASE_URL');
+  const reasoningEffortRaw = env.MEMLOOM_LLM_REASONING_EFFORT?.trim() ?? '';
+  const thinkingFormatRaw = env.MEMLOOM_LLM_THINKING_FORMAT?.trim().toLowerCase() ?? '';
+  const timeoutRaw = env.MEMLOOM_LLM_TIMEOUT_MS?.trim() ?? '';
+  if (
+    baseUrl === '' &&
+    model === '' &&
+    apiKey === '' &&
+    reasoningEffortRaw === '' &&
+    thinkingFormatRaw === '' &&
+    timeoutRaw === ''
+  ) {
+    return null;
+  }
+  if (baseUrl === '') throw new LlmConfigError('后台模型配置不完整：设了 MEMLOOM_LLM_* 参数，却没有 MEMLOOM_LLM_BASE_URL');
   if (model === '') throw new LlmConfigError('后台模型配置不完整：设了 MEMLOOM_LLM_BASE_URL，却没有 MEMLOOM_LLM_MODEL');
   let url: URL;
   try {
@@ -37,19 +57,52 @@ export function llmConfigFromEnv(env: NodeJS.ProcessEnv): LlmConfig | null {
     throw new LlmConfigError(`MEMLOOM_LLM_BASE_URL 不是合法的网址：${baseUrl}`);
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new LlmConfigError(`MEMLOOM_LLM_BASE_URL 只支持 http / https：${baseUrl}`);
-  return { baseUrl: baseUrl.replace(/\/+$/, ''), model, apiKey: apiKey === '' ? undefined : apiKey };
+  let reasoningEffort: string | undefined;
+  if (reasoningEffortRaw !== '') {
+    if (!REASONING_EFFORT_RE.test(reasoningEffortRaw)) {
+      throw new LlmConfigError(`MEMLOOM_LLM_REASONING_EFFORT 不合法（只允许字母、数字、下划线或连字符，如 low / high / max）：${reasoningEffortRaw}`);
+    }
+    reasoningEffort = reasoningEffortRaw;
+  }
+  let thinkingFormat: LlmThinkingFormat | undefined;
+  if (thinkingFormatRaw !== '') {
+    if (thinkingFormatRaw !== 'openai' && thinkingFormatRaw !== 'deepseek') {
+      throw new LlmConfigError(`MEMLOOM_LLM_THINKING_FORMAT 只支持 openai 或 deepseek，收到的是：${thinkingFormatRaw}`);
+    }
+    thinkingFormat = thinkingFormatRaw;
+  }
+  let timeoutMs: number | undefined;
+  if (timeoutRaw !== '') {
+    const parsed = Number(timeoutRaw);
+    if (!Number.isSafeInteger(parsed) || parsed < 1_000 || parsed > 600_000) {
+      throw new LlmConfigError(`MEMLOOM_LLM_TIMEOUT_MS 必须是 1000 到 600000 之间的整数毫秒数：${timeoutRaw}`);
+    }
+    timeoutMs = parsed;
+  }
+  return {
+    baseUrl: baseUrl.replace(/\/+$/, ''),
+    model,
+    apiKey: apiKey === '' ? undefined : apiKey,
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...(thinkingFormat ? { thinkingFormat } : {}),
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+  };
 }
 
-/** 回执和 doctor 里描述端点用：只露主机和模型名，不带凭据、不带路径里的查询串。 */
+/** 回执和 doctor 里描述端点用：只露主机、模型名和思考档位，不带凭据、不带路径里的查询串。 */
 export function describeLlm(config: LlmConfig): string {
   const host = new URL(config.baseUrl).host;
-  return `${host}（模型 ${config.model}，${config.apiKey ? '带凭据' : '不带凭据'}）`;
+  const thinking = config.reasoningEffort
+    ? `，思考 ${config.reasoningEffort}${config.thinkingFormat && config.thinkingFormat !== 'openai' ? `（${config.thinkingFormat}）` : ''}`
+    : '';
+  return `${host}（模型 ${config.model}${thinking}，${config.apiKey ? '带凭据' : '不带凭据'}）`;
 }
 
-/** 从模型回复里把 JSON 抠出来：允许整段就是 JSON，也允许裹在 ```json 代码块里或夹着解释文字。 */
+/** 从模型回复里把 JSON 抠出来：允许整段就是 JSON，也允许裹在 ```json 代码块里、带 <think> 思考段或夹着解释文字。 */
 export function extractJson(text: string): unknown {
-  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text);
-  const candidate = (fenced?.[1] ?? text).trim();
+  const cleaned = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(cleaned);
+  const candidate = (fenced?.[1] ?? cleaned).trim();
   try {
     return JSON.parse(candidate) as unknown;
   } catch {
@@ -59,6 +112,29 @@ export function extractJson(text: string): unknown {
   const end = Math.max(candidate.lastIndexOf(']'), candidate.lastIndexOf('}'));
   if (start < 0 || end <= start) throw new Error('模型回复里找不到 JSON');
   return JSON.parse(candidate.slice(start, end + 1)) as unknown;
+}
+
+/** 构造发往 OpenAI 兼容 /chat/completions 的请求体（按需附带思考参数）。 */
+export function buildChatBody(config: LlmConfig, instructions: string, payload: unknown): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    model: config.model,
+    temperature: 0.1,
+    messages: [
+      { role: 'system', content: instructions },
+      { role: 'user', content: JSON.stringify(payload, null, 1) },
+    ],
+  };
+  if (config.reasoningEffort) {
+    const format: LlmThinkingFormat = config.thinkingFormat ?? 'openai';
+    const disabled = config.reasoningEffort.toLowerCase() === 'off' || config.reasoningEffort.toLowerCase() === 'none';
+    if (format === 'deepseek') {
+      body.thinking = { type: disabled ? 'disabled' : 'enabled' };
+      if (!disabled) body.reasoning_effort = config.reasoningEffort;
+    } else {
+      body.reasoning_effort = config.reasoningEffort;
+    }
+  }
+  return body;
 }
 
 /** 两个后台适配共用的一次对话请求：系统提示词 + 一份当数据用的 JSON；返回模型回复里抠出来的 JSON。凭据只在内存里的 Authorization 头。 */
@@ -77,14 +153,7 @@ async function chatJson(
     response = await fetchImpl(`${config.baseUrl}/chat/completions`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        model: config.model,
-        temperature: 0.1,
-        messages: [
-          { role: 'system', content: instructions },
-          { role: 'user', content: JSON.stringify(payload, null, 1) },
-        ],
-      }),
+      body: JSON.stringify(buildChatBody(config, instructions, payload)),
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (error) {

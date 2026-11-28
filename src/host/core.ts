@@ -88,8 +88,16 @@ export class HostCore {
       projectId: config.projectId,
       roleName: config.roleName,
       stateDir: config.stateDir,
-      // 只放端点和模型名：凭据不进任务说明，走子进程环境
-      llm: config.llm ? { baseUrl: config.llm.baseUrl, model: config.llm.model, timeoutMs: config.llm.timeoutMs } : null,
+      // 只放端点、模型名和思考参数：凭据不进任务说明，走子进程环境
+      llm: config.llm
+        ? {
+            baseUrl: config.llm.baseUrl,
+            model: config.llm.model,
+            ...(config.llm.reasoningEffort ? { reasoningEffort: config.llm.reasoningEffort } : {}),
+            ...(config.llm.thinkingFormat ? { thinkingFormat: config.llm.thinkingFormat } : {}),
+            timeoutMs: config.llm.timeoutMs,
+          }
+        : null,
       crewCliPath: config.crewCliPath ?? null,
     };
     this.inline = new InProcessRunner((job) => runBackgroundJob(job, this.deps()), (line) => this.pushLog(line));

@@ -171,8 +171,8 @@ export interface HostConfig {
 }
 
 /** 脱离子进程任务说明里可序列化的那部分配置（没有模型实例、没有检索器实例） */
-/** 脱离任务说明里允许落盘的后台模型配置：只有端点和模型名，**永远没有凭据**（凭据只走子进程环境）。 */
-export type JobLlmConfig = Pick<LlmConfig, 'baseUrl' | 'model' | 'timeoutMs'>;
+/** 脱离任务说明里允许落盘的后台模型配置：只有端点、模型名和思考参数，**永远没有凭据**（凭据只走子进程环境）。 */
+export type JobLlmConfig = Pick<LlmConfig, 'baseUrl' | 'model' | 'reasoningEffort' | 'thinkingFormat' | 'timeoutMs'>;
 export interface JobConfig {
   home: string;
   dbPath: string;

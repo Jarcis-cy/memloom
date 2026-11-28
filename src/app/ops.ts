@@ -23,6 +23,7 @@ import {
 } from '../retriever/index.js';
 import { scopeFor, UsageError, type MemloomContext } from './context.js';
 import { daemonStatus, daemonStop, type DaemonStatus } from './daemon.js';
+import { type EnvFileStatus } from './env.js';
 import { describeLlm, llmConfigFromEnv, OpenAiCompatibleCondenseModel, type LlmConfig } from './llm.js';
 import { defaultArchiveName, exportArchive } from '../portable/export.js';
 import { importArchive, type ImportMode } from '../portable/import.js';
@@ -40,6 +41,8 @@ export class NotConfiguredError extends Error {
 
 export interface MemloomOptions {
   env?: NodeJS.ProcessEnv;
+  /** 环境配置文件加载情况（由 CLI / MCP 传入，只用于 doctor 报告，不含凭据） */
+  envFile?: EnvFileStatus;
   /** 注入检索器（测试用）；不给就按环境变量造 */
   retriever?: Retriever;
   retrieverConfig?: RetrieverConfig;
@@ -646,6 +649,7 @@ export class Memloom {
       llm: llm
         ? { configured: true, endpoint: describeLlm(llm), notice: '启用即表示凝结时会把待处理经历、现有原则和铁律发给这个端点；凭据只在内存里' }
         : { configured: false, notice: '未配置：concresce 会明确拒绝执行，不会调用任何外部服务' },
+      ...(this.options.envFile ? { env_file: this.options.envFile } : {}),
     };
   }
 }

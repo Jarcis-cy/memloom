@@ -6,6 +6,14 @@
  * 真实验证「缺模型 → 后台下载 → 热切换」的用例不靠这个环境假装：它在代码里显式打开 autoDownload:true，并且只向 127.0.0.1 的替身发请求。
  */
 process.env.MEMLOOM_AUTO_DOWNLOAD = '0';
+process.env.MEMLOOM_NO_ENV_FILE = '1';
+delete process.env.MEMLOOM_ENV_FILE;
 delete process.env.MEMLOOM_HF_ENDPOINT;
 delete process.env.HF_ENDPOINT;
 delete process.env.MEMLOOM_TEST_MODEL_MANIFEST;
+delete process.env.MEMLOOM_LLM_BASE_URL;
+delete process.env.MEMLOOM_LLM_MODEL;
+delete process.env.MEMLOOM_LLM_API_KEY;
+delete process.env.MEMLOOM_LLM_REASONING_EFFORT;
+delete process.env.MEMLOOM_LLM_THINKING_FORMAT;
+delete process.env.MEMLOOM_LLM_TIMEOUT_MS;

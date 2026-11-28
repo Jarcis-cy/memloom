@@ -66,7 +66,15 @@ export function jobSpec(job: BackgroundJob, config: JobConfig): JobSpec {
       projectId: config.projectId,
       roleName: config.roleName,
       stateDir: config.stateDir,
-      llm: config.llm ? { baseUrl: config.llm.baseUrl, model: config.llm.model, timeoutMs: config.llm.timeoutMs } : null,
+      llm: config.llm
+        ? {
+            baseUrl: config.llm.baseUrl,
+            model: config.llm.model,
+            ...(config.llm.reasoningEffort ? { reasoningEffort: config.llm.reasoningEffort } : {}),
+            ...(config.llm.thinkingFormat ? { thinkingFormat: config.llm.thinkingFormat } : {}),
+            timeoutMs: config.llm.timeoutMs,
+          }
+        : null,
       crewCliPath: config.crewCliPath ?? null,
     },
   };

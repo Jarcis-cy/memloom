@@ -8,7 +8,7 @@ import { FtsOnlyRetriever } from '../src/retriever/index.js';
 import type { Retriever, RerankHit } from '../src/retriever/types.js';
 import { HostCore, MemorySessionStore, stripInjections, shouldHint, toolFailed } from '../src/host/index.js';
 import type { ConversationMessage, CondenseModel, ExtractionModel } from '../src/core/types.js';
-import type { HostConfig, HostEvent } from '../src/host/types.js';
+import type { BackgroundEntry, HostConfig, HostEvent, HostResponse, SessionStore } from '../src/host/types.js';
 
 /**
  * 宿主无关核心的多轮事件（临时 SQLite + 临时 home + 注入的离线模型与假检索器；不联网、不碰真实 ~/.memloom、不加载模型）：
@@ -426,6 +426,112 @@ test('事件校验：缺 sessionId 直接拒绝；不认识的事件类型拒绝
     const first = await core.handle({ type: 'session_start', sessionId: 'pi-session' });
     const startupAgain = await core.handle({ type: 'session_start', sessionId: 'pi-session', resume: false });
     assert.equal(startupAgain.staticBlock, first.staticBlock);
+  } finally {
+    await cleanup(root, core);
+  }
+});
+
+/* ---------- 工具计数触发复盘：回执必须在事务边界上就完整（回归：以前这里漏了 await） ---------- */
+
+function copyBackground(result: unknown): BackgroundEntry[] {
+  return ((result as HostResponse).background ?? []).map((entry) => ({ ...entry }));
+}
+
+/**
+ * 包一层的会话存储：每次事务回调一返回（核心还没把状态存回去、锁还没释放）就抓一份回执里 background 的快照，
+ * 存回去之后再抓一份。漏 await 时核心是「回调先返回、复盘条目事后才补进同一个对象」：调用者因为微任务顺序碰巧看得到，
+ * 但事务边界上的那份快照是空的。
+ */
+function snapshottingStore(onReturned: BackgroundEntry[][], onReleased: BackgroundEntry[][]): SessionStore {
+  const inner = new MemorySessionStore();
+  return {
+    withSession(sessionId, fn, options) {
+      return inner
+        .withSession(
+          sessionId,
+          async (state, fresh) => {
+            const result = await fn(state, fresh);
+            onReturned.push(copyBackground(result));
+            return result;
+          },
+          options,
+        )
+        .then((result) => {
+          onReleased.push(copyBackground(result));
+          return result;
+        });
+    },
+    load: (sessionId) => inner.load(sessionId),
+    delete: (sessionId) => inner.delete(sessionId),
+  };
+}
+
+/** 连续几次成功的 tool_result；记下每次回执回到调用者手上的时刻 */
+async function feedTools(core: HostCore, count: number): Promise<Array<{ response: HostResponse; at: number }>> {
+  const out: Array<{ response: HostResponse; at: number }> = [];
+  for (let i = 1; i <= count; i += 1) {
+    const response = await core.handle({ type: 'tool_result', sessionId: 's1', toolName: 'Bash', exitCode: 0, output: `第 ${i} 次成功` });
+    out.push({ response, at: Date.now() });
+  }
+  return out;
+}
+
+test('工具调用累计 15 次：第 15 次成功 tool_result 的回执在事务回调返回前就带上复盘条目，前 14 次不提前；只等投递、不等后台跑完', async () => {
+  const root = temp();
+  seed(join(root, 'personal.db'));
+  const returned: BackgroundEntry[][] = [];
+  const released: BackgroundEntry[][] = [];
+  let calls = 0;
+  let extractFinishedAt = Number.POSITIVE_INFINITY;
+  const slowExtract: ExtractionModel = {
+    id: 'slow-extract',
+    // 慢抽取：核心要是等它跑完才回执，回执回到调用者手上的时刻就不会早于它跑完的时刻
+    extract: async () => {
+      calls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      extractFinishedAt = Date.now();
+      return [];
+    },
+  };
+  const core = new HostCore(config(root, { extractionModel: slowExtract, sessionStore: snapshottingStore(returned, released) }), { retriever: fakeRetriever(semanticScore), jobMode: 'inline' });
+  try {
+    await core.handle({ type: 'session_start', sessionId: 's1' });
+    const fed = await feedTools(core, 15);
+    for (const [index, { response }] of fed.entries()) {
+      assert.equal(response.hintState, 'off', '成功的工具调用不触发提醒');
+      if (index < 14) assert.deepEqual(response.background, [], `第 ${index + 1} 次不该提前触发复盘`);
+    }
+    const fifteenth = fed[14]?.response as HostResponse;
+    // 调用者拿到的第 15 次回执本身
+    assert.deepEqual(fifteenth.background, [{ kind: 'review', state: 'queued' }]);
+    // 事务边界上（回调已返回、状态还没存回去）回执就已经完整：以前漏了 await，这里抓到的是空数组
+    assert.equal(returned.length, 16, 'session_start + 15 次工具调用各一次事务');
+    assert.deepEqual(returned.slice(0, 15), Array.from({ length: 15 }, () => []), '开场和前 14 次：事务返回时都没有复盘条目');
+    assert.deepEqual(returned[15], [{ kind: 'review', state: 'queued' }], '第 15 次事务回调返回时，复盘条目已经在回执里');
+    assert.deepEqual(released[15], [{ kind: 'review', state: 'queued' }], '状态存回去之后回执仍然完整');
+    // 只等投递：抽取模型要 300 毫秒，第 15 次回执在它跑完之前就回到了调用者手上
+    assert.ok((fed[14]?.at ?? 0) < extractFinishedAt, `回执在抽取跑完之后才回来（回执 ${String(fed[14]?.at)}，抽取完成 ${String(extractFinishedAt)}）`);
+    await core.settle();
+    assert.equal(calls, 1, '复盘任务在回执之后照常跑了一次');
+  } finally {
+    await cleanup(root, core);
+  }
+});
+
+test('没有配置后台模型：第 15 次工具调用的回执同样在事务返回前就带上 skipped 的复盘条目', async () => {
+  const root = temp();
+  seed(join(root, 'personal.db'));
+  const returned: BackgroundEntry[][] = [];
+  const released: BackgroundEntry[][] = [];
+  const core = new HostCore(config(root, { sessionStore: snapshottingStore(returned, released) }), { retriever: fakeRetriever(semanticScore), jobMode: 'inline' });
+  try {
+    await core.handle({ type: 'session_start', sessionId: 's1' });
+    const fed = await feedTools(core, 15);
+    const expected: BackgroundEntry[] = [{ kind: 'review', state: 'skipped', reason: '没有配置后台模型（MEMLOOM_LLM_BASE_URL / MEMLOOM_LLM_MODEL），什么都没发' }];
+    assert.deepEqual(fed[14]?.response.background, expected);
+    assert.deepEqual(returned[15], expected, '事务回调返回时 skipped 的复盘条目已经在回执里');
+    assert.deepEqual(released[15], expected, '状态存回去之后回执仍然完整');
+    assert.ok(returned.slice(0, 15).every((snapshot) => snapshot.length === 0), '前 14 次不提前');
   } finally {
     await cleanup(root, core);
   }

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 宿主子进程入口（通用，不绑任何宿主；契约见 projects/memloom/refs/2026-11-27-m4-host-contract.md）：
+ * 宿主子进程入口（通用，不绑任何宿主；契约见 docs/HOST-CONTRACT.md）：
  *   node dist/src/host/hook-cli.js --event           stdin 是一条 HostEvent 的 JSON → stdout 是一条 HostResponse 的 JSON
  *   node dist/src/host/hook-cli.js --job <说明文件>   跑一个后台任务（由核心另起的脱离短命子进程：宿主进程退出了它也做得完，跑完即退）
  * 任何情况都退出 0（宿主不该被记忆系统拦住），诊断只写 stderr，且不写用户原话、不写凭据。

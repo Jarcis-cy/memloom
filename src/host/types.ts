@@ -1,5 +1,5 @@
 /**
- * 宿主无关核心的类型（契约见 projects/memloom/refs/2026-11-27-m4-host-contract.md）：
+ * 宿主无关核心的类型（契约见 docs/HOST-CONTRACT.md）：
  * 宿主适配层把各家 hook 的原始载荷翻成 HostEvent，核心回 HostResponse；这里只有类型和纯函数，不碰数据库。
  */
 import type { CondenseModel, ExtractionModel } from '../core/types.js';

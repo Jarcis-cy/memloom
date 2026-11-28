@@ -1,5 +1,5 @@
 /**
- * 和 agent-crew 的单向联动（正本：agent-crew/refs/2026-11-27-memloom-interop.md，兼容端 df658de）：
+ * 和 agent-crew 的单向联动（两仓单向联动的约定见 docs/HOST-CONTRACT.md）：
  * - 项目 / 角色作用域只认显式给出的、已建队的项目目录（`.team/manifest.json` 的 project_id）和已经存在的角色；
  * - CRAFT 是从 SQLite 出发的单向投影：只改 `<!-- memloom:craft:start/end -->` 之间，区外字节原样，手写条目保留，整份 ≤ 40 条；
  * - BRIEF.md 只由 agent-crew 自己的 `crew brief --write` 渲染，这里只在用户显式给了可信 CLI 路径时用参数数组去调它。

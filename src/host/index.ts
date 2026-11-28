@@ -1,5 +1,5 @@
 /**
- * memloom M4 宿主无关核心的公开入口（契约 v1.2，见 projects/memloom/refs/2026-11-27-m4-host-contract.md）。
+ * memloom M4 宿主无关核心的公开入口（契约 v1.3，见 docs/HOST-CONTRACT.md）。
  * 宿主适配层只需要这里导出的东西：HostCore + resolveHostConfig（Pi 扩展进程内常驻），或 hook-cli 的通用子进程入口 hookCliMain。
  * 这里的导出名就是契约里的字段名；改了要同步改契约版本并通知适配者。
  */

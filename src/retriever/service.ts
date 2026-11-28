@@ -37,6 +37,7 @@ import {
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { basename, join } from 'node:path';
 import { createInterface } from 'node:readline';
+import { isProcessAlive } from '../core/process-alive.js';
 import { ensureStateDir, statePaths, type StatePaths } from './paths.js';
 import {
   MAX_TEXT_CHARS,
@@ -249,16 +250,11 @@ function gcStale(dir: string, log: (message: string) => void): void {
   }
 }
 
-export function isProcessAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    // EPERM 说明进程在但不归我们管，也算活着
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
+/**
+ * 这个 pid 是不是还活着（和会话文件锁共用 src/core/process-alive.ts 那一套）：
+ * Linux 下 kill(0) 对僵尸 / dead 进程也成功，所以再看一眼 /proc/<pid>/stat，已经退出的不算活着。
+ */
+export { isProcessAlive };
 
 /**
  * 这个 pid 是不是 memloom 的检索守护进程：看 /proc/<pid>/cmdline 里有没有入口脚本名。

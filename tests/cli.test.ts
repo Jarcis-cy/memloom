@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -321,6 +321,61 @@ test('限修 B1/B2 真实进程：重复总结采集 → 导出 → 导入成功
     const recalled = await run(['--db', d, 'recall', '软链接'], { ...env, MEMLOOM_HOME: home2 });
     assert.match(recalled.stdout, /\[E1\]/, '记忆确实已经落库');
     rmSync(home2, { recursive: true, force: true });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** 临时项目：`.team/manifest.json` + 已经有的角色目录（memloom 不替项目建 .team，这里手工搭） */
+function makeProject(root: string, projectId: string, roles: string[]): string {
+  const project = join(root, `proj-${projectId}`);
+  mkdirSync(join(project, '.team', 'roles'), { recursive: true });
+  writeFileSync(
+    join(project, '.team', 'manifest.json'),
+    `${JSON.stringify({ schema_version: 1, project_id: projectId, project_name: '假项目', domain: 'custom', created_at: '2026-01-01T00:00:00.000Z' }, null, 2)}\n`,
+  );
+  for (const role of roles) {
+    mkdirSync(join(project, '.team', 'roles', role), { recursive: true });
+    writeFileSync(join(project, '.team', 'roles', role, 'ROLE.md'), `# ${role}\n`);
+  }
+  return project;
+}
+
+test('角色归档真实进程：--project --role 的 export 成功；同项目同名角色 import 成功；另一个项目的同名角色 import 被拒绝', async () => {
+  const { root, env } = home();
+  try {
+    const project = makeProject(root, 'demo-proj', ['reviewer']);
+    const role = ['--project', project, '--role', 'reviewer'];
+    const captured = await run([...role, 'capture', '--kind', 'pitfall', '--summary', '删目录之前先 ls -la 看一眼是不是软链接，不要顺着链接把目标目录删了。', '--evidence', '上次就是带尾斜杠 rm -rf 误删的'], env);
+    assert.equal(captured.code, 0, captured.stderr);
+    const archive = join(root, 'reviewer.tar.gz');
+    // 以前这里必报「导出角色归档必须给项目编号」（export 漏传了项目的 project_id；import 没漏）
+    const exported = await run([...role, 'export', '--out', archive, '--json'], env);
+    assert.equal(exported.code, 0, `角色导出失败：${exported.stderr}`);
+    assert.doesNotMatch(exported.stderr + exported.stdout, /导出角色归档必须给项目编号/);
+    const report = JSON.parse(exported.stdout) as { scope: string; counts: { experiences: number } };
+    assert.equal(report.scope, 'role:reviewer');
+    assert.equal(report.counts.experiences, 1);
+    assert.equal(existsSync(archive), true);
+
+    // 同一个项目（同一个 project_id）的同名角色：清掉库再导回，成功
+    rmSync(join(project, '.team', '.mind.db'), { force: true });
+    const imported = await run([...role, 'import', archive, '--json'], env);
+    assert.equal(imported.code, 0, imported.stderr);
+    const back = JSON.parse(imported.stdout) as { committed: boolean; post_failures: number; experiences: { added: number } };
+    assert.equal(back.committed, true);
+    assert.equal(back.post_failures, 0);
+    assert.equal(back.experiences.added, 1);
+
+    // 另一个项目的同名角色：拒绝，一条都不导进去
+    const other = makeProject(root, 'other-proj', ['reviewer']);
+    const refused = await run(['--project', other, '--role', 'reviewer', 'import', archive], env);
+    assert.equal(refused.code, 1);
+    assert.match(refused.stderr, /来自项目「demo-proj」，当前目标是「other-proj」.*角色备份不能迁进另一个项目的同名角色/);
+    const otherStore = openStore(join(other, '.team', '.mind.db'));
+    assert.equal(otherStore.listExperiences('role:reviewer', { limit: 10 }).length, 0, '另一个项目的同名角色库里一条都没有');
+    otherStore.close();
+    assert.equal(existsSync(REAL_HOME), realHomeBefore, '真实 ~/.memloom 没有被创建');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

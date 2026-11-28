@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { openStore, type Store } from '../src/core/index.js';
 import { LocalRetriever, hybridRecall, type ServiceStatus } from '../src/retriever/index.js';
 
+import { isProcessAlive as isAlive } from '../src/retriever/service.js';
 const STUB_DAEMON = fileURLToPath(new URL('./fixtures/retriever/stub-daemon.js', import.meta.url));
 const REAL_DAEMON = fileURLToPath(new URL('../src/retriever/daemon.js', import.meta.url));
 const ENTRY_URL = new URL('../src/retriever/index.js', import.meta.url).href;
@@ -54,15 +55,6 @@ async function withTemp(fn: (temp: Temp, store: Store) => Promise<void>): Promis
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });
-  }
-}
-
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
   }
 }
 

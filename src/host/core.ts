@@ -1,5 +1,5 @@
 /**
- * 宿主无关核心的入口（契约见 projects/memloom/refs/2026-11-27-m4-host-contract.md）：一条 HostEvent 进来，一条 HostResponse 出去。
+ * 宿主无关核心的入口（契约见 docs/HOST-CONTRACT.md）：一条 HostEvent 进来，一条 HostResponse 出去。
  * 这一层把四件事接在一起：静态区（session_start 算一次就固定）、当轮提醒（有前台预算、去重）、
  * 纠错即时入库 + 后台任务（有界、不等网络）、分歧轻声通知（同批一次）。适配层只做载荷翻译。
  */
@@ -298,7 +298,7 @@ export class HostCore {
           if (!state.remindedKeys.includes(key)) state.remindedKeys.push(key);
         }
       }
-      this.maybeReview(state, response, event.sessionId);
+      await this.maybeReview(state, response, event.sessionId);
       return response;
     });
   }

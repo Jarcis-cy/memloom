@@ -436,7 +436,7 @@ export class Memloom {
     const at = this.now();
     const outPath = args.outPath ? resolve(args.outPath) : join(this.ctx.home, 'exports', defaultArchiveName(scope, at));
     if (!args.outPath) mkdirSync(dirname(outPath), { recursive: true, mode: 0o700 });
-    const report = exportArchive({ store: this.store, scope, outPath, projectDir: this.ctx.projectDir, now: () => at });
+    const report = exportArchive({ store: this.store, scope, outPath, projectDir: this.ctx.projectDir, projectId: this.ctx.projectId, now: () => at });
     return {
       ...report,
       note: '包里只有纯文本：没有 SQLite、向量字节、模型和缓存；常见格式的凭据已掩蔽（见 masked），但 memloom 不能保证识别所有秘密，建议人手目检一遍',

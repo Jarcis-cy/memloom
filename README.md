@@ -342,7 +342,7 @@ npm test   # 75 个离线用例：tar / gzip 往返与不可信输入边界、�
 
 ## 本地运行（M4：宿主无关核心、双区注入与 agent-crew 联动）
 
-M4 把「注入 + 采集 + 调度 + 跨仓联动」写成一层**宿主无关核心** `src/host/`（入口 `dist/src/host/index.js`）：Pi 的扩展在进程内常驻调用它；别的宿主可以用通用子进程入口 `node dist/src/host/hook-cli.js --event`（stdin 一条事件 JSON，stdout 一条回执 JSON，永远退出 0）。适配层只做「取事件 → 调核心 → 把三段文字放到该放的位置」，不写 SQL、检索、提示词、凝结。契约（事件 / 回执字段、放置位置、目录边界）见 memory-rnd 项目档案 `projects/memloom/refs/2026-11-27-m4-host-contract.md`。
+M4 把「注入 + 采集 + 调度 + 跨仓联动」写成一层**宿主无关核心** `src/host/`（入口 `dist/src/host/index.js`）：Pi 的扩展在进程内常驻调用它；别的宿主可以用通用子进程入口 `node dist/src/host/hook-cli.js --event`（stdin 一条事件 JSON，stdout 一条回执 JSON，永远退出 0）。适配层只做「取事件 → 调核心 → 把三段文字放到该放的位置」，不写 SQL、检索、提示词、凝结。契约（事件 / 回执字段、三段文字的放置位置、目录边界、和 agent-crew 的单向联动）见 [docs/HOST-CONTRACT.md](docs/HOST-CONTRACT.md)。
 
 ### 1. 一条最小闭环（临时目录 + 注入的离线模型，不联网、不碰真实 `~/.memloom`）
 
@@ -385,7 +385,7 @@ memloom hook --event                                            # 通用子进�
 npm test                                                        # 离线全套；M4 新增 tests/host-core.test.ts、tests/host-interop.test.ts、tests/condense-schedule.test.ts
 ```
 
-`tests/host-interop.test.ts` 里和真实 agent-crew 的那条用例，默认找本机工作区里的 agent-crew CLI（绝对路径，可用 `MEMLOOM_TEST_CREW_CLI` 改），找不到就跳过；它只在临时项目里建队、加角色、写 CRAFT、刷新速览、`crew check` 和打包，不改 agent-crew 仓。
+`tests/host-interop.test.ts` 里和真实 agent-crew 的那条用例，先看环境变量 `MEMLOOM_TEST_CREW_CLI`（`crew.mjs` 的绝对路径），没给就按编译产物的位置找和 memloom 同级的克隆（`../agent-crew/scripts/crew.mjs`），都没有就跳过并提示怎么给；它不看 cwd、不写任何本机路径；它只在临时项目里建队、加角色、写 CRAFT、刷新速览、`crew check` 和打包，不改 agent-crew 仓。
 
 ## 延伸阅读
 

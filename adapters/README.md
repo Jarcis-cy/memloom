@@ -11,7 +11,7 @@
 | `smoke-pi.mjs` | 288 行 | 可重复的回环冒烟：真实 `pi` 进程 + 只听 127.0.0.1 的模拟模型端点 + 全部在临时目录的隔离环境 |
 | `../tests/adapter-pi.test.ts` | 283 行 | 离线映射回归 8 条（用按脚本回话的核心替身，不依赖核心实现） |
 
-适配器不写 SQL、不做检索、不写提示词、不去重限频、不加载模型——这些全在 `src/host/`（契约见 `.agents/memory-rnd/projects/memloom/refs/2026-11-27-m4-host-contract.md`）。适配器只认核心的公开面 `HostCore.handle(HostEvent)` / `close()` 和 `resolveHostConfig`。
+适配器不写 SQL、不做检索、不写提示词、不去重限频、不加载模型——这些全在 `src/host/`（契约见 [docs/HOST-CONTRACT.md](../docs/HOST-CONTRACT.md)）。适配器只认核心的公开面 `HostCore.handle(HostEvent)` / `close()` 和 `resolveHostConfig`。
 
 ## 安装与最小启动（Linux）
 
@@ -93,7 +93,7 @@ cd $T/work && env -i HOME=$T PATH="$PATH" PI_CODING_AGENT_DIR=$T/agent MEMLOOM_H
 - 真实供应商的缓存命中与计费、真实模型对提醒的反应：回环替身证明不了，也没接外网。
 - 真实语义模型（0.6B 本地模型或 API）经本适配出一次真提醒：没有模型，真实核心档只证到「保持安静」。提醒的落点由夹具档证明，核心自己的打分与去重由核心所有者的测试负责。
 - 交互界面（TUI）里的 `/new`、`/resume`、`/reload`、中途 steer / followUp：只有类型依据和离线回归，没有真实触发。steer / followUp 的原话只记录，不挂提醒。
-- Pi 1.6.0（工作区 `pi-web` 里那一份）：只用它的类型声明核对了 `pi/index.ts`（0 错误，和 1.4.0 一样），没有实跑。
+- Pi 1.6.0：只用它的类型声明核对了 `pi/index.ts`（0 错误，和 1.4.0 一样），没有实跑。
 - Windows：按要求不测。
 - 回环冒烟里模拟端点会按脚本调一次会失败的 `bash`，真实模型不会这样；它只是为了稳定造出一次真实工具失败。
 

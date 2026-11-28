@@ -10,6 +10,7 @@ import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, 
 import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { selectFlushWindow, type FlushWindow } from '../core/capture.js';
+import { isProcessAlive } from '../core/process-alive.js';
 import { stripInjections } from './static.js';
 import type { SessionIdentity, SessionState, SessionStore, TranscriptMessage } from './types.js';
 
@@ -118,16 +119,6 @@ export class MemorySessionStore implements SessionStore {
 }
 
 /* ---------- 跨进程（hook） ---------- */
-
-export function isProcessAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
-  }
-}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

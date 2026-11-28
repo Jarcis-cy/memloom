@@ -19,7 +19,13 @@ import type { CondenseModel, ExtractionModel } from '../src/core/types.js';
  * 另有通用子进程入口（--event / --job）的真实进程用例，后台模型走回环替身。
  */
 
-const CREW = process.env.MEMLOOM_TEST_CREW_CLI ?? '/home/codeaudit-dev/agent-runtime-workspace/agent-crew/scripts/crew.mjs';
+// 真实 agent-crew 的 CLI：先看 MEMLOOM_TEST_CREW_CLI；没给就按本文件的编译产物位置找同级克隆（<父目录>/agent-crew/scripts/crew.mjs）。
+// 都没有就跳过那条用例。不猜 cwd，不写任何本机路径。
+const CREW_SIBLING = [
+  fileURLToPath(new URL('../../../agent-crew/scripts/crew.mjs', import.meta.url)), // 从 dist/tests/ 往上三层：memloom 的同级目录
+  fileURLToPath(new URL('../../agent-crew/scripts/crew.mjs', import.meta.url)), // 直接从源码 tests/ 跑的时候
+].find((candidate) => existsSync(candidate));
+const CREW = process.env.MEMLOOM_TEST_CREW_CLI ?? CREW_SIBLING ?? '';
 const CLI = fileURLToPath(new URL('../src/cli/main.js', import.meta.url));
 const HOOK = fileURLToPath(new URL('../src/host/hook-cli.js', import.meta.url));
 const BACKGROUND = fileURLToPath(new URL('../src/host/background.js', import.meta.url));
@@ -337,7 +343,7 @@ test('通用子进程入口：--event 回一条 HostResponse（永远退出 0）
   }
 });
 
-test('真实 agent-crew：建队 → 项目 / 角色记忆 → CRAFT → brief 保留人工区 → check 通过 → 打包不带 .mind.db', { skip: !hasCrew && `没找到 agent-crew CLI：${CREW}` }, async () => {
+test('真实 agent-crew：建队 → 项目 / 角色记忆 → CRAFT → brief 保留人工区 → check 通过 → 打包不带 .mind.db', { skip: !hasCrew && `没找到 agent-crew CLI（${CREW || '没给 MEMLOOM_TEST_CREW_CLI，同级目录下也没有 ../agent-crew/scripts/crew.mjs'}）：设 MEMLOOM_TEST_CREW_CLI=<crew.mjs 的绝对路径>，或把 agent-crew 克隆到和 memloom 同级的目录` }, async () => {
   const root = temp();
   try {
     const project = makeTeamProject(root);

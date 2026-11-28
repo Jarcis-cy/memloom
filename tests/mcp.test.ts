@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,11 +23,11 @@ interface Session {
   stderr: string;
 }
 
-async function start(dbPath: string, home: string): Promise<Session> {
+async function start(dbPath: string, home: string, extra: Record<string, string> = {}): Promise<Session> {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [MCP],
-    env: { ...process.env, MEMLOOM_HOME: home, MEMLOOM_DB: dbPath },
+    env: { ...process.env, MEMLOOM_HOME: home, MEMLOOM_DB: dbPath, ...extra },
     stderr: 'pipe',
   });
   const session: Session = { client: new Client({ name: 'memloom-test-client', version: '0.0.0' }), transport, stderr: '' };
@@ -130,5 +130,50 @@ test('标准 stdio MCP：列工具 → 捕获 / 召回 / 铁律 / 分歧 / 凝�
   }
   assert.equal(existsSync(join(home, 'readable', 'personal', 'STANDING.md')), true);
   assert.match(readFileSync(join(home, 'readable', 'personal', 'STANDING.md'), 'utf8'), /没有明说怎么处理就不许擅自动手改用户的项目文件。/);
+  rmSync(home, { recursive: true, force: true });
+});
+
+/** 临时项目：`.team/manifest.json` + 已经有的角色目录（memloom 不替项目建 .team，这里手工搭） */
+function makeProject(home: string, projectId: string, roles: string[]): string {
+  const project = join(home, `proj-${projectId}`);
+  mkdirSync(join(project, '.team', 'roles'), { recursive: true });
+  writeFileSync(
+    join(project, '.team', 'manifest.json'),
+    `${JSON.stringify({ schema_version: 1, project_id: projectId, project_name: '假项目', domain: 'custom', created_at: '2026-01-01T00:00:00.000Z' }, null, 2)}\n`,
+  );
+  for (const role of roles) {
+    mkdirSync(join(project, '.team', 'roles', role), { recursive: true });
+    writeFileSync(join(project, '.team', 'roles', role, 'ROLE.md'), `# ${role}\n`);
+  }
+  return project;
+}
+
+test('MCP 和命令行共用同一层：角色作用域的 memloom_export 成功；另一个项目的同名角色 memloom_import 被拒绝', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'memloom-mcp-role-'));
+  const project = makeProject(home, 'demo-proj', ['reviewer']);
+  const archive = join(home, 'reviewer.tar.gz');
+  const first = await start(join(project, '.team', '.mind.db'), home, { MEMLOOM_PROJECT: project, MEMLOOM_ROLE: 'reviewer' });
+  try {
+    const captured = await call(first, 'memloom_capture', { kind: 'pitfall', summary: '删目录之前先 ls -la 看一眼是不是软链接，不要顺着链接把目标目录删了。', evidence: '上次就是带尾斜杠 rm -rf 误删的' });
+    assert.equal(captured.isError, false, captured.text);
+    // 以前这里必报「导出角色归档必须给项目编号」：命令行和 MCP 走的是同一个 exportArchive，漏传的是它
+    const exported = await call(first, 'memloom_export', { out_path: archive });
+    assert.equal(exported.isError, false, `角色导出失败：${exported.text}`);
+    const report = exported.json as { scope: string; counts: { experiences: number } };
+    assert.equal(report.scope, 'role:reviewer');
+    assert.equal(report.counts.experiences, 1);
+    assert.equal(existsSync(archive), true);
+  } finally {
+    await first.client.close();
+  }
+  const other = makeProject(home, 'other-proj', ['reviewer']);
+  const second = await start(join(other, '.team', '.mind.db'), home, { MEMLOOM_PROJECT: other, MEMLOOM_ROLE: 'reviewer' });
+  try {
+    const refused = await call(second, 'memloom_import', { archive_path: archive });
+    assert.equal(refused.isError, true);
+    assert.match(refused.text, /来自项目「demo-proj」，当前目标是「other-proj」.*角色备份不能迁进另一个项目的同名角色/);
+  } finally {
+    await second.client.close();
+  }
   rmSync(home, { recursive: true, force: true });
 });

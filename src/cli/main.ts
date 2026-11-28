@@ -8,6 +8,7 @@ import { resolveContext } from '../app/context.js';
 import { Memloom, NotConfiguredError, UsageError } from '../app/ops.js';
 import { projectCraft, refreshBrief, trustedCrewCli } from '../host/crew.js';
 import { hookCliMain } from '../host/hook-cli.js';
+import { autoDownloadOf, defaultModelDir, describeDownloadProgress, modelDownloadStatus, resolveEndpoint, runModelDownload, spawnBackgroundDownload } from '../retriever/index.js';
 
 const USAGE = `memloom —— 把 AI Agent 干活攒下的经历织成工作原则
 
@@ -29,7 +30,11 @@ const USAGE = `memloom —— 把 AI Agent 干活攒下的经历织成工作原�
   import <文件.tar.gz> [--mode merge|replace]
                                            导入归档（默认 merge；replace 会把包里没有的生效原则软退役留底）
   daemon status | stop                     查看或安全停止共享检索服务（不启动、不杀未知进程）
-  doctor                                   体检：配置、库、检索模式、容量（不启动模型）
+  models status                            本地模型：目录、两个模型齐不齐、当前 modelId、后台下载进度或上次失败原因（只读，不联网）
+  models download [--mirror <url>] [--out <目录>] [--embedding <文件名>] [--reranker <文件名>] [--background]
+                                           下载固定的 Qwen3 0.6B ONNX 双模型（按固定清单校验大小和 sha256，可续传，总量 ≤ 3 GiB）；
+                                           --background 写完状态就退出、下载放后台；镜像源优先 --mirror > MEMLOOM_HF_ENDPOINT > HF_ENDPOINT > 官方
+  doctor                                   体检：配置、库、检索模式、本地模型与下载进度、容量（不启动模型）
   hook --event                            宿主子进程入口：stdin 读一条 HostEvent 的 JSON，stdout 写一条 HostResponse 的 JSON（Pi 进程内常驻请直接用 src/host/index.ts 的 HostCore）；永远退出 0
   craft sync [--brief]                     把当前项目 / 角色作用域的生效原则单向投到 .team/CRAFT.md 的 memloom 管理区（需要 --project [--role]）；
                                            --brief 再用 MEMLOOM_CREW_CLI 指定的可信 agent-crew CLI 刷新 .team/BRIEF.md，没配置就提示手动
@@ -37,7 +42,8 @@ const USAGE = `memloom —— 把 AI Agent 干活攒下的经历织成工作原�
 通用参数：--home <目录>（默认 ~/.memloom）、--db <库文件>、--project <项目目录>、--role <角色名>、
           --state-dir <状态目录>、--scope <作用域>、--json（按 JSON 输出）
 环境变量：MEMLOOM_HOME / MEMLOOM_DB / MEMLOOM_PROJECT / MEMLOOM_ROLE / MEMLOOM_STATE_DIR / MEMLOOM_SCOPE、
-          检索配置见 README「本地运行（M2）」、后台模型 MEMLOOM_LLM_BASE_URL / MEMLOOM_LLM_MODEL / MEMLOOM_LLM_API_KEY
+          检索配置见 README「本地运行（M2）」、后台模型 MEMLOOM_LLM_BASE_URL / MEMLOOM_LLM_MODEL / MEMLOOM_LLM_API_KEY、
+          模型自动下载 MEMLOOM_AUTO_DOWNLOAD=0（关闭）/ MEMLOOM_HF_ENDPOINT（镜像源）
 `;
 
 interface Args {
@@ -45,7 +51,7 @@ interface Args {
   flags: Record<string, string | true>;
 }
 
-const BOOLEAN_FLAGS = new Set(['json', 'help', 'all', 'core', 'brief', 'event']);
+const BOOLEAN_FLAGS = new Set(['json', 'help', 'all', 'core', 'brief', 'event', 'background']);
 
 function parseArgs(argv: readonly string[]): Args {
   const words: string[] = [];
@@ -86,7 +92,7 @@ function has(args: Args, name: string): boolean {
 
 /** 排版用的键：带子命令的命令里，只有 dilemmas resolve 要单独排 */
 function renderKey(command: string): string {
-  return command === 'dilemmas resolve' ? command : (command.split(' ')[0] as string);
+  return command === 'dilemmas resolve' || command === 'models status' || command === 'models download' ? command : (command.split(' ')[0] as string);
 }
 
 /** 事务提交之后的三个后置步骤分别报：成功 / 正常退化 / 失败（原因 + 重试）；有失败时先写明「已落库，不是回滚」。 */
@@ -216,6 +222,32 @@ function render(command: string, result: unknown): string {
       else lines.push('速览：没有加 --brief，BRIEF.md 没有刷新（它只由 agent-crew 的 crew brief --write 渲染）');
       return lines.join('\n');
     }
+    case 'models status': {
+      const models = r.models as Record<'embedding' | 'reranker', { ready: boolean; file: string | null; reason: string | null; dir: string }>;
+      const line = (kind: 'embedding' | 'reranker', label: string): string => {
+        const one = models[kind];
+        return `  ${label}：${one.ready ? `已就绪（${String(one.file)}）` : `未就绪（${String(one.reason ?? '文件不齐')}，目录 ${String(one.dir)}）`}`;
+      };
+      return [
+        `本地模型目录：${String(r.model_dir)}（状态目录 ${String(r.state_dir)}）`,
+        line('embedding', '向量模型 embedding'),
+        line('reranker', '精排模型 reranker'),
+        r.ready ? `当前 modelId：${String(r.model_id)}；召回可以用本地语义检索` : '当前没有可用的本地模型，召回只用字面检索',
+        `自动下载：${r.auto_download ? '开启' : '关闭'}；${String(r.auto_download_note)}`,
+        `  ${r.endpoint_error ? `镜像源地址无效：${String(r.endpoint_error)}` : `镜像源 ${String(r.endpoint)}`}`,
+        `后台下载：${describeDownloadProgress(r.download as Parameters<typeof describeDownloadProgress>[0])}`,
+      ].join('\n');
+    }
+    case 'models download': {
+      if (r.background === true) return `已在后台开始下载（pid=${String(r.pid)}）：${String(r.model_dir)}；镜像源 ${String(r.endpoint)}\n进度看 memloom models status，日志在 ${String(r.state_dir)}/model-download.log；下完之后下一次召回会自动切到本地语义检索`;
+      const files = r.files as Array<{ model: string; path: string; status: string }>;
+      const count = (status: string): number => files.filter((f) => f.status === status).length;
+      return [
+        `下载完成：两个模型都已就绪（${String(r.endpoint)} → ${String(r.model_dir)}）`,
+        `  文件 ${files.length} 个：本来就有 ${count('present')}，这次新下 ${count('downloaded')}，续传完成 ${count('resumed')}；这次实际下载 ${(Number(r.downloaded_bytes) / 1024 ** 2).toFixed(1)} MiB`,
+        `  当前 modelId：${String(r.model_id)}`,
+      ].join('\n');
+    }
     case 'doctor': {
       const db = r.db as Record<string, unknown>;
       const retriever = r.retriever as Record<string, unknown>;
@@ -239,6 +271,17 @@ function render(command: string, result: unknown): string {
         out.push(`  缺向量：原则 ${String(missing.principles ?? '（当前模式不产生向量）')}，经历 ${String(missing.experiences ?? '（当前模式不产生向量）')}`);
       }
       out.push(`检索：${String(retriever.mode)}${retriever.ok ? '（可用）' : '（不可用，召回只有字面结果）'}；${String(retriever.detail ?? '')}`);
+      if (r.models) {
+        const models = r.models as Record<string, unknown>;
+        const kinds = models.models as Record<'embedding' | 'reranker', { ready: boolean; file: string | null; reason: string | null }>;
+        const one = (kind: 'embedding' | 'reranker', label: string): string => (kinds[kind]?.ready ? `${label} 已就绪（${String(kinds[kind]?.file)}）` : `${label} 未就绪（${String(kinds[kind]?.reason ?? '文件不齐')}）`);
+        out.push(
+          `本地模型：目录 ${String(models.model_dir)}；${one('embedding', '向量模型')}；${one('reranker', '精排模型')}${models.ready ? `；当前 modelId ${String(models.model_id)}` : '；召回只有字面结果'}`,
+          `  自动下载：${models.auto_download ? '开启' : '关闭'}；${String(models.auto_download_note)}`,
+          `  ${models.endpoint_error ? `镜像源地址无效：${String(models.endpoint_error)}` : `镜像源 ${String(models.endpoint)}`}`,
+          `  后台下载：${describeDownloadProgress(models.download as Parameters<typeof describeDownloadProgress>[0])}`,
+        );
+      }
       out.push(`  配置：${JSON.stringify(retriever.config)}`);
       const daemonText =
         daemon.state === 'running'
@@ -266,7 +309,7 @@ async function main(): Promise<number> {
   }
   const command = args.words[0] as string;
   const sub = args.words[1];
-  const commandKey = (command === 'iron-rules' || command === 'dilemmas' || command === 'daemon' || command === 'craft') && sub ? `${command} ${sub}` : command;
+  const commandKey = (command === 'iron-rules' || command === 'dilemmas' || command === 'daemon' || command === 'craft' || command === 'models') && sub ? `${command} ${sub}` : command;
   const json = has(args, 'json');
   if (command === 'hook') {
     // 原样把 hook 之后的参数交给 hook 入口（--event 之类），stdin / stdout 不经过这里的排版
@@ -337,6 +380,49 @@ async function main(): Promise<number> {
         if (!sub) throw new UsageError('import 需要归档文件路径：memloom import <文件.tar.gz> [--mode merge|replace]');
         result = await app.importArchive({ scope: scopeArg, archivePath: sub, mode: flag(args, 'mode') });
         break;
+      case 'models status': {
+        const config = app.retrieverConfig();
+        const auto = autoDownloadOf(config);
+        result = modelDownloadStatus({ // 和 models download 同一口径：--out > MEMLOOM_MODEL_DIR > <状态目录>/models
+          modelDir: flag(args, 'out') ?? process.env.MEMLOOM_MODEL_DIR ?? defaultModelDir(ctx.stateDir),
+          stateDir: ctx.stateDir, mirror: flag(args, 'mirror'), autoDownload: auto.enabled, autoDownloadNote: auto.note });
+        break;
+      }
+      case 'models download': {
+        const mirror = flag(args, 'mirror');
+        const modelDir = flag(args, 'out') ?? process.env.MEMLOOM_MODEL_DIR ?? defaultModelDir(ctx.stateDir);
+        const endpoint = resolveEndpoint(process.env, mirror);
+        const embedding = flag(args, 'embedding');
+        const reranker = flag(args, 'reranker');
+        if (has(args, 'background')) {
+          // 前台不等网络：写明状态就退出，下载在脱离的子进程里跑
+          const spawned = spawnBackgroundDownload({ stateDir: ctx.stateDir, modelDir, endpoint, embedding, reranker });
+          if (spawned.pid === null) throw new UsageError(spawned.reason);
+          result = { action: 'download', background: true, pid: spawned.pid, model_dir: modelDir, state_dir: ctx.stateDir, endpoint, embedding: embedding ?? null, reranker: reranker ?? null };
+          break;
+        }
+        let lastPrintAt = 0;
+        const mib = (bytes: number): string => `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
+        const download = await runModelDownload({
+          stateDir: ctx.stateDir,
+          modelDir,
+          endpoint,
+          embedding,
+          reranker,
+          onLine: json ? undefined : (line) => process.stdout.write(`  ${line}\n`),
+          onProgress: json
+            ? undefined
+            : (progress) => {
+                const now = Date.now();
+                if (progress.done === null && now - lastPrintAt < 1_000) return;
+                lastPrintAt = now;
+                const percent = progress.fileTotal > 0 ? Math.floor((progress.fileBytes / progress.fileTotal) * 100) : 0;
+                process.stdout.write(`  ${progress.model}/${progress.path}  ${mib(progress.fileBytes)} / ${mib(progress.fileTotal)}  ${percent}%\n`);
+              },
+        });
+        result = { action: 'download', background: false, model_dir: download.modelDir, state_dir: download.stateDir, endpoint: download.endpoint, already_present: download.alreadyPresent, downloaded_bytes: download.downloadedBytes, files: download.files, model_id: download.modelId };
+        break;
+      }
       case 'daemon status':
       case 'daemon stop':
         result = await app.daemon({ action: (commandKey as string).split(' ')[1] as string });
@@ -356,6 +442,8 @@ async function main(): Promise<number> {
         throw new UsageError('「craft」后面要跟子命令：craft sync [--brief]');
       case 'iron-rules':
       case 'dilemmas':
+      case 'models':
+        throw new UsageError('「models」后面要跟子命令：models status | models download [--mirror <url>] [--out <目录>] [--background]');
       case 'daemon':
         throw new UsageError(`「${command}」后面要跟子命令（${command === 'iron-rules' ? 'list / add / disable' : command === 'dilemmas' ? 'list / resolve' : 'status / stop'}）`);
       default:

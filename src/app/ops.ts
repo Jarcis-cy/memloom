@@ -13,6 +13,9 @@ import {
   createRetriever,
   hybridRecall,
   rebuildVectors,
+  autoDownloadOf,
+  modelDirOf,
+  modelDownloadStatus,
   retrieverConfigFromEnv,
   type Retriever,
   type RetrieverConfig,
@@ -567,6 +570,7 @@ export class Memloom {
     const ctx = this.ctx;
     const retriever = this.retriever;
     const health = await retriever.health();
+    const configForModels = this.retrieverConfig();
     const llm = this.llmConfig();
     const daemonState: DaemonStatus = await daemonStatus(ctx.stateDir);
     const db: { path: string; exists: boolean; bytes: number | null } = { path: ctx.dbPath, exists: existsSync(ctx.dbPath), bytes: null };
@@ -607,6 +611,15 @@ export class Memloom {
       counts,
       retriever: { mode: health.mode, ok: health.ok, detail: health.detail ?? null, config: describeRetrieverConfig(this.retrieverConfig()) },
       daemon: daemonState,
+      // 本地模型与后台下载的真实状态：只读文件，不联网、不拉起任何进程
+      models: modelDownloadStatus({
+        modelDir: modelDirOf(configForModels, ctx.stateDir),
+        stateDir: ctx.stateDir,
+        env: this.env,
+        mirror: configForModels.mode === 'auto' || configForModels.mode === 'local-onnx' ? configForModels.mirror : undefined,
+        autoDownload: autoDownloadOf(configForModels).enabled,
+        autoDownloadNote: autoDownloadOf(configForModels).note,
+      }),
       llm: llm
         ? { configured: true, endpoint: describeLlm(llm), notice: '启用即表示凝结时会把待处理经历、现有原则和铁律发给这个端点；凭据只在内存里' }
         : { configured: false, notice: '未配置：concresce 会明确拒绝执行，不会调用任何外部服务' },
@@ -618,7 +631,7 @@ export class Memloom {
 function describeRetrieverConfig(config: RetrieverConfig): Record<string, unknown> {
   switch (config.mode) {
     case 'local-onnx':
-      return { mode: config.mode, state_dir: config.stateDir, model_dir: config.modelDir, idle_ms: config.idleMs ?? null };
+      return { mode: config.mode, state_dir: config.stateDir, model_dir: config.modelDir, idle_ms: config.idleMs ?? null, ...describeDownload(config) };
     case 'api':
       return {
         mode: config.mode,
@@ -640,4 +653,17 @@ function describeRetrieverConfig(config: RetrieverConfig): Record<string, unknow
       };
     }
   }
+}
+
+/** 自动下载开关和镜像源（只露主机名，地址还没校验过就照实说「无效」）。 */
+function describeDownload(config: { autoDownload?: boolean; mirror?: string }): Record<string, unknown> {
+  let mirror: unknown = config.mirror ?? null;
+  if (config.mirror) {
+    try {
+      mirror = new URL(config.mirror).host;
+    } catch {
+      mirror = '（无效地址）';
+    }
+  }
+  return { auto_download: config.autoDownload ?? true, mirror };
 }

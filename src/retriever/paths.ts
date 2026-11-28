@@ -61,7 +61,24 @@ export function defaultModelDir(stateDir: string): string {
   return join(stateDir, 'models');
 }
 
-/** 两个模型子目录都在才算本地模型可用（只看目录，不加载）。 */
-export function localModelDirsExist(modelDir: string, exists: (path: string) => boolean): boolean {
-  return modelDir !== '' && exists(join(modelDir, 'embedding')) && exists(join(modelDir, 'reranker'));
+/**
+ * 模型下载的锁、状态和日志位置：锁跟着模型目录走（同一个模型目录同一时间只许一个下载进程），
+ * 状态和日志跟着状态目录走（`memloom models status` / `doctor` 读的就是这一份）。
+ */
+export interface ModelDownloadPaths {
+  modelDir: string;
+  stateDir: string;
+  lockPath: string;
+  statePath: string;
+  logPath: string;
+}
+
+export function modelDownloadPaths(modelDir: string, stateDir: string): ModelDownloadPaths {
+  return {
+    modelDir: resolve(modelDir),
+    stateDir: resolve(stateDir),
+    lockPath: join(resolve(modelDir), '.download.lock'),
+    statePath: join(resolve(stateDir), 'model-download.json'),
+    logPath: join(resolve(stateDir), 'model-download.log'),
+  };
 }

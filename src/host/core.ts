@@ -9,7 +9,7 @@ import { OpenAiCompatibleCondenseModel, OpenAiCompatibleExtractionModel } from '
 import { CorrectionThrottle, captureCorrection } from '../core/capture.js';
 import { openStore, type Store } from '../core/store.js';
 import type { CondenseModel, ExtractionModel } from '../core/types.js';
-import { createRetriever } from '../retriever/index.js';
+import { AutoRetriever, createRetriever, prepareHostRetriever } from '../retriever/index.js';
 import type { Retriever } from '../retriever/types.js';
 import { DetachedJobRunner, InProcessRunner, runBackgroundJob, type JobDeps } from './background.js';
 import { dilemmaNotice } from './dilemma.js';
@@ -101,6 +101,8 @@ export class HostCore {
   get retriever(): Retriever {
     if (!this.retrieverValue) {
       this.retrieverValue = createRetriever(this.config.retrieverConfig ?? { mode: 'fts-only', reason: '宿主没有给检索配置，提醒保持安静' });
+      // auto 模式的切换 / 拉起下载 / 失败原因记进宿主日志，排错时能看见
+      if (this.retrieverValue instanceof AutoRetriever) this.retrieverValue.setLog((line) => this.pushLog(line));
     }
     return this.retrieverValue;
   }
@@ -223,6 +225,10 @@ export class HostCore {
       if (fresh) {
         response.dilemmaNotice = dilemmaNotice({ store: this.store, scope: this.scope }).text;
       }
+      // 唯一一处显式预检：auto 模式缺本地模型时在这里就拉起后台下载（不等网络），本轮和接下来的提醒先用字面检索；
+      // 模型已经下齐时这里会切到本地检索，下面的预热照常进行。关了自动下载、配了 API 或 fts-only 时什么都不做
+      const prepared = prepareHostRetriever(this.retriever);
+      if (prepared.download) response.background.push({ kind: 'model-download', state: prepared.download.state, reason: prepared.download.reason });
       if (this.config.warmupOnStart !== false && this.retriever.dimensions > 0) {
         this.track(warmupInBackground(this.retriever, (line) => this.pushLog(line)));
       }

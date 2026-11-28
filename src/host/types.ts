@@ -28,7 +28,8 @@ export function toolFailed(event: Extract<HostEvent, { type: 'tool_result' }>): 
 
 export type HintState = 'off' | 'skipped' | 'silent' | 'timeout' | 'unavailable' | 'empty' | 'hinted';
 
-export type BackgroundKind = 'review' | 'flush' | 'correction';
+/** model-download = 缺本地模型时在后台拉起的下载（session_start 登记一次；下载完下一次召回自动切到本地语义检索） */
+export type BackgroundKind = 'review' | 'flush' | 'correction' | 'model-download';
 
 export interface BackgroundEntry {
   kind: BackgroundKind;

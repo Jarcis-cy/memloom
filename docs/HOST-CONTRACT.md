@@ -1,4 +1,4 @@
-# memloom 宿主契约（公开版 v1.3）
+# memloom 宿主契约（公开版 v1.4）
 
 这份文档说清「宿主适配层」和「宿主无关核心」之间的约定。字段名就是 `src/host/types.ts` / `src/host/index.ts` 的导出名；要改字段，先在这里改版本号，再通知 `adapters/` 的维护者。
 
@@ -48,7 +48,7 @@ interface HostResponse {
   hintReason?: string;           // skipped / timeout / unavailable 时的大白话原因
   dilemmaNotice: string;         // 只在 session_start 可能非空
   correction: { captured: boolean; experienceId: number | null; reason: string | null };
-  background: Array<{ kind: 'review' | 'flush' | 'correction'; state: 'queued' | 'spawned' | 'skipped' | 'coalesced'; reason?: string }>;
+  background: Array<{ kind: 'review' | 'flush' | 'correction' | 'model-download'; state: 'queued' | 'spawned' | 'skipped' | 'coalesced'; reason?: string }>;
   elapsedMs: { total: number; hint: number | null };
 }
 ```
@@ -80,6 +80,7 @@ interface HostResponse {
 | 用户原话命中强纠错 | **立刻**同步写一条 `correction` 经历（同会话每 3 轮最多 1 次），再排一个 `correction` 凝结任务 | 凝结时把这一条经历 + 现有原则 + 铁律发给后台端点 |
 | 每累计 10 条用户消息或 15 次工具调用 | `review`：把上次覆盖以来的消息（最多 20 条，去掉 memloom 自己注入的文字）交抽取模型写经历 | 最近对话片段 |
 | `compact` / `session_end` | `flush`：最近 ≤ 20 条未覆盖消息只抽取经历，不凝结 | 最近对话片段 |
+| `session_start`（auto / local-onnx 模式，本地模型没下齐） | `model-download`：在后台拉起 `memloom models download`，本轮和下完前的提醒只用字面检索；下完后的下一次召回自动切到本地语义检索。`spawned` / `coalesced`（已有下载在跑）/ `skipped`（退避期、镜像地址无效、拉不起来）；`MEMLOOM_AUTO_DOWNLOAD=0`、配了 API 或 `fts-only` 时不登记 | 固定公开模型仓库或镜像的 GET 请求（不带凭据、不带用户文本） |
 
 - 后台模型就是命令行那一个端点（`MEMLOOM_LLM_BASE_URL` / `MEMLOOM_LLM_MODEL` / `MEMLOOM_LLM_API_KEY`），没配置就 `state: 'skipped'`，什么都不发。
 - 同一会话同一时刻最多 1 个任务在跑、最多 1 个排队，同类任务在队列里只留一个（`coalesced`）。
@@ -127,4 +128,5 @@ core.close();
 - v1.1（2026-11-27）：按当时的宿主证据补充映射与落点事实。
 - v1.2（2026-11-27）：决定只接 Pi，保留通用子进程入口。导出形状不变。
 - v1.3（2026-11-27）：`tool_result` 新增可选 `skipHint`（缺省不变）；`session_end` 改为保留同库同作用域的快照（清对话片段）以保证续会话原字节；任务说明不含凭据、凭据只走子进程环境；默认预算注明是单次提醒的预算。`HostResponse` 形状不变。
+- v1.4（2026-11-28）：`background` 新增 `model-download`（auto / local-onnx 模式缺本地模型时，`session_start` 登记一次：`spawned` = 刚拉起后台下载、`coalesced` = 已有下载在跑、`skipped` = 退避期 / 镜像地址无效 / 拉不起来；关了自动下载、配了 API 或 fts-only 时不登记）。提醒在模型下完前照常静默，下完并在模型目录根 manifest.json 原子标成 ready 之后的下一次提醒自动走本地语义检索；`HostResponse` 其余形状不变。
 - 改任何字段：这里改版本 + 通知 `adapters/` 的维护者。

@@ -209,15 +209,23 @@ M2 在 M1 的字面召回之上加了语义层：**用可注入的 `Retriever` �
 | `api` | 2~4 GB 的小主机；**只有你显式给出 base URL 才启用**，对齐 OpenAI 兼容的 `/v1/embeddings` 和 `/v1/rerank` | 无本地模型，凭据只在内存配置或环境变量里 |
 | `fts-only` | 没模型、断网、服务起不来时的保底：SQLite FTS5 trigram + 参数化短词 | 零依赖 |
 
-### 1. 取模型（人工主动做一次，不会自动联网）
+### 1. 取模型：默认自动下，也可以手动下
+
+默认（`auto` 没配 API，或显式 `local-onnx`）第一次召回发现本地没有模型时，**当场退回字面检索、不卡前台**，同时在后台拉起 `memloom models download`；两个模型都下完并校验通过后，同一个会话的下一次召回自动切到本地语义检索，不用重启。
 
 ```bash
-# 固定 revision 的公开量化模型，按 Hugging Face 元数据校验 sha256，支持断点续传；总量约 1.8 GiB，不上 3 GiB
-node scripts/fetch-retriever-models.mjs --out ~/.memloom/models
-#   embedding/onnx/model_int8.onnx（约 585 MiB） + reranker/onnx/model_quantized.onnx（约 1163 MiB）
+memloom models status                                   # 目录、两个模型齐不齐、当前 modelId、后台下载进度或上次失败原因
+memloom models download [--mirror <url>] [--out <目录>] [--embedding <文件名>] [--reranker <文件名>] [--background]
+#   --background 写完状态就退出，下载放后台；--json 只输出最后的结果
+node scripts/fetch-retriever-models.mjs --out ~/.memloom/models   # 旧脚本还在，只是上面这条命令的薄壳
 ```
 
-模型目录不进 Git。缺模型目录时 `local-onnx` 的检索器会在 `embed()` 直接报不可用、`health()` 如实说 `fts-only`，混合召回照常给字面结果。
+- **固定清单，不认镜像报的摘要**：仓库、revision（完整提交哈希）、允许的量化文件、每个文件的大小和 sha256 / git 摘要都编译在 `src/retriever/models-manifest.ts`（来自官方源元数据，并和已校验过的文件对过）。镜像只负责传字节；大小和摘要全对才 `rename` 成正式文件，一个模型的文件全部就绪才最后原子写它的 `memloom-model.json`。总量上限 3 GiB（默认约 1.8 GiB），流写时也守着。
+- **镜像源**：优先级 `--mirror` > `MEMLOOM_HF_ENDPOINT` > `HF_ENDPOINT` > `https://huggingface.co`（例如 `https://hf-mirror.com`）。只接受 `https://`（地址只写到主机名和端口）；每一跳跳转都重新检查，https 不许降到 http；请求不带凭据、不传用户文本，不执行远端代码，不碰系统代理。用镜像时的信任边界：字节来自镜像，**摘要来自代码里的固定清单**，所以镜像给坏文件只会被拒绝重下，不会污染模型。
+- **关掉自动下载**：`MEMLOOM_AUTO_DOWNLOAD=0` 或代码里 `autoDownload: false`——缺模型时永远只做字面检索，不联网（`npm test` 就是这么统一关的）。已配置 API 或 `fts-only` 的模式从不下载本地模型。
+- **续传 / 并发 / 退避**：写盘走 `<文件>.part` + HTTP Range（206 要对得上区间，服务端回 200 就从头重下），大小或摘要不对删掉重下一次（重下的字节同样计入 3 GiB 总量：累计收到多少就数多少，到上限就停、不再重试，网络缓冲里在途的几个字节只计数不落盘）；全程持有 `<模型目录>/.download.lock/`（文件版面包店算法：每个进程只有以自己 pid 命名的选择牌和票，内容写满才可见；票号最小的活着的那一个下载，其余退出不下载；只删自己的标记和确定已退出进程的唯一命名文件，活锁不抢），同一台机器多个会话同时缺模型只跑一个下载；状态写 `<状态目录>/model-download.json`（含进度、失败原因和 30 分钟退避时间），日志在 `<状态目录>/model-download.log`。失败后 30 分钟内不再自动拉起，手动 `memloom models download` 不受退避限制但不能绕过活锁。
+- 模型目录不进 Git。手动摆进去的合法模型也认（看文件不看目录），`memloom-model.json` 可有可无。
+- **发布门槛**：目录不完整时开始下载，会先在根 `manifest.json` 原子写 `state: downloading`，两个模型的文件全部校验通过才各写 `memloom-model.json`，最后原子改成 `state: ready`——中间不管文件看起来多齐都不会被当成「已就绪」切过去（同一个模型目录换一个状态目录看也一样），所以下完后的 modelId 一定带 revision。下载失败时目录保持 `downloading` 标记，下次成功下载后解除；手工摆好的完整目录不写这道门。
 
 ### 2. 共享检索服务是怎么起的
 

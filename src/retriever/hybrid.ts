@@ -20,6 +20,7 @@ import {
   type Retriever,
   type RetrieverMode,
 } from './types.js';
+import { prepareRetriever } from './auto.js';
 
 export type RecallType = 'principle' | 'experience';
 
@@ -175,8 +176,10 @@ export async function hybridRecall(options: HybridRecallOptions): Promise<Hybrid
   const candidateLimit = options.candidateLimit ?? RECALL_DEFAULTS.candidateLimit;
   const rerankTimeoutMs = options.rerankTimeoutMs ?? RECALL_DEFAULTS.rerankTimeoutMs;
   const query = options.query.trim();
+  // 真正要召回之前的一次显式预检：auto 模式下缺模型就拉起后台下载并退回字面检索（不等网络）；整次调用固定用这一个检索器
+  const retriever = prepareRetriever(options.retriever);
 
-  const vector = await vectorStage(options.store, options.scope, options.retriever, query, {
+  const vector = await vectorStage(options.store, options.scope, retriever, query, {
     vectorLimit: options.vectorLimit ?? RECALL_DEFAULTS.vectorLimit,
     embedTimeoutMs: options.embedTimeoutMs ?? RECALL_DEFAULTS.embedTimeoutMs,
     recentExperiences: options.recentExperiences ?? RECALL_DEFAULTS.recentExperiences,
@@ -256,7 +259,7 @@ export async function hybridRecall(options: HybridRecallOptions): Promise<Hybrid
   } else if (candidates.length > 0) {
     try {
       const hits = await withTimeout<RerankHit[]>(
-        options.retriever.rerank(query, candidates.map((item) => item.text), candidates.length),
+        retriever.rerank(query, candidates.map((item) => item.text), candidates.length),
         rerankTimeoutMs,
         '等精排结果',
       );
@@ -279,7 +282,7 @@ export async function hybridRecall(options: HybridRecallOptions): Promise<Hybrid
     fallbackScore(b) - fallbackScore(a) || strength(b) - strength(a) || a.id - b.id;
   candidates.sort(reranked ? (a, b) => b.score - a.score || byFallback(a, b) : byFallback);
 
-  const retrieverMode = (await options.retriever.health().catch(() => null))?.mode ?? 'fts-only';
+  const retrieverMode = (await retriever.health().catch(() => null))?.mode ?? 'fts-only';
   const mode: RecallMode = {
     retriever: retrieverMode,
     stage: reranked ? (vector.reason ? 'lexical-rerank' : 'full') : vector.reason ? 'lexical-only' : 'vector-only',
@@ -371,9 +374,11 @@ export async function indexVectors(options: IndexOptions): Promise<IndexResult> 
   const limit = Math.min(Math.max(1, options.limit ?? INDEX_DEFAULTS.limit), INDEX_DEFAULTS.maxLimit);
   const batchSize = Math.min(Math.max(1, options.batchSize ?? INDEX_DEFAULTS.batchSize), INDEX_DEFAULTS.maxBatch);
   const types = options.types ?? ['principle', 'experience'];
+  // 和混合召回同一个预检：auto 模式下模型没齐就先拉起后台下载，这一轮如实报「没有向量模型」
+  const retriever = prepareRetriever(options.retriever);
   const result: IndexResult = {
     scope: options.scope,
-    modelId: options.retriever.modelId,
+    modelId: retriever.modelId,
     scanned: 0,
     embedded: 0,
     remaining: 0,
@@ -381,12 +386,12 @@ export async function indexVectors(options: IndexOptions): Promise<IndexResult> 
     reason: null,
     lastIds: { ...options.afterId },
   };
-  if (options.retriever.dimensions <= 0) {
+  if (retriever.dimensions <= 0) {
     result.reason = '检索器没有固定维度，存不了可比的向量';
     return result;
   }
-  const byteLength = options.retriever.dimensions * 4;
-  const modelId = options.force ? '' : options.retriever.modelId;
+  const byteLength = retriever.dimensions * 4;
+  const modelId = options.force ? '' : retriever.modelId;
   let budget = limit;
   for (const type of types) {
     if (budget <= 0) break;
@@ -401,7 +406,7 @@ export async function indexVectors(options: IndexOptions): Promise<IndexResult> 
       if (batch.length === 0) break;
       let vectors: Float32Array[];
       try {
-        vectors = await options.retriever.embed(batch.map((row) => row.text), 'document');
+        vectors = await retriever.embed(batch.map((row) => row.text), 'document');
       } catch (error) {
         result.failed += batch.length;
         result.reason = messageOf(error);
@@ -409,13 +414,13 @@ export async function indexVectors(options: IndexOptions): Promise<IndexResult> 
       }
       batch.forEach((row, index) => {
         const vector = vectors[index];
-        if (!vector || vector.length !== options.retriever.dimensions) {
+        if (!vector || vector.length !== retriever.dimensions) {
           result.failed += 1;
           return;
         }
         const bytes = vectorToBytes(vector);
-        if (type === 'principle') options.store.setPrincipleEmbedding(row.id, bytes, options.retriever.modelId);
-        else options.store.setExperienceEmbedding(row.id, bytes, options.retriever.modelId);
+        if (type === 'principle') options.store.setPrincipleEmbedding(row.id, bytes, retriever.modelId);
+        else options.store.setExperienceEmbedding(row.id, bytes, retriever.modelId);
         result.embedded += 1;
       });
       budget -= batch.length;

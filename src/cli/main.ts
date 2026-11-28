@@ -440,10 +440,10 @@ async function main(): Promise<number> {
       }
       case 'craft':
         throw new UsageError('「craft」后面要跟子命令：craft sync [--brief]');
-      case 'iron-rules':
-      case 'dilemmas':
       case 'models':
         throw new UsageError('「models」后面要跟子命令：models status | models download [--mirror <url>] [--out <目录>] [--background]');
+      case 'iron-rules':
+      case 'dilemmas':
       case 'daemon':
         throw new UsageError(`「${command}」后面要跟子命令（${command === 'iron-rules' ? 'list / add / disable' : command === 'dilemmas' ? 'list / resolve' : 'status / stop'}）`);
       default:

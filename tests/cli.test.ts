@@ -554,3 +554,23 @@ test('分歧拍板后向量这一步起不来 / 抛错 / 只建了一部分（�
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('缺子命令时各自报自己的用法，不串台', async () => {
+  const { root, env } = home();
+  try {
+    const cases: Array<[string, RegExp]> = [
+      ['iron-rules', /「iron-rules」后面要跟子命令（list \/ add \/ disable）/],
+      ['dilemmas', /「dilemmas」后面要跟子命令（list \/ resolve）/],
+      ['daemon', /「daemon」后面要跟子命令（status \/ stop）/],
+      ['models', /「models」后面要跟子命令：models status \| models download/],
+      ['craft', /「craft」后面要跟子命令：craft sync/],
+    ];
+    for (const [cmd, expected] of cases) {
+      const res = await run([cmd], env);
+      assert.equal(res.code, 1, `${cmd} 缺子命令应退出 1`);
+      assert.match(res.stderr, expected, `${cmd} 报错串台：${res.stderr}`);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

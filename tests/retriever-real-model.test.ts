@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openStore } from '../src/core/index.js';
+import { isProcessAlive } from '../src/core/process-alive.js';
 import { LocalRetriever, hybridRecall, indexVectors, pickHints, type ServiceStatus } from '../src/retriever/index.js';
 import { NEGATIVE_QUERIES, SYNTHETIC_EXPERIENCES, SYNTHETIC_PRINCIPLES, SYNONYM_CASES, TECH_ANCHOR_QUERY } from './fixtures/retriever/synthetic.js';
 
@@ -21,14 +22,7 @@ const T0 = '2026-11-27T10:00:00.000Z';
 const IDLE_MS = 20_000;
 const CLIENTS = 5;
 
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
+const isAlive = isProcessAlive;
 
 function rssMiB(pid: number): number {
   const status = readFileSync(`/proc/${pid}/status`, 'utf8');

@@ -9,6 +9,9 @@ import { fileURLToPath } from 'node:url';
 import { createServer as createSilentSocket, type AddressInfo, type Socket } from 'node:net';
 import { openStore } from '../src/core/index.js';
 
+import { resolveContext } from '../src/app/context.js';
+import { Memloom } from '../src/app/ops.js';
+import type { Retriever } from '../src/retriever/index.js';
 /**
  * 真实进程的命令行端到端（临时库 + 临时 home，绝不碰 ~/.memloom、不联网、不调外部模型）：
  * capture → recall → export → 另一个库 import → recall；铁律与分歧的人工入口；后台模型走回环 OpenAI 兼容端点；
@@ -376,6 +379,177 @@ test('角色归档真实进程：--project --role 的 export 成功；同项目�
     assert.equal(otherStore.listExperiences('role:reviewer', { limit: 10 }).length, 0, '另一个项目的同名角色库里一条都没有');
     otherStore.close();
     assert.equal(existsSync(REAL_HOME), realHomeBefore, '真实 ~/.memloom 没有被创建');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** 让可读快照写不出来：STANDING.md 的位置被一个同名目录占着（chmod 0500 在 root 下不生效，这个办法对谁都稳定） */
+function blockSnapshot(home: string): void {
+  mkdirSync(join(home, 'readable', 'personal', 'STANDING.md'), { recursive: true });
+}
+
+interface ResolveReport {
+  committed: boolean;
+  post_failures: number;
+  resolved: { id: number; status: string };
+  principle: { id: number };
+  superseded: { id: number; status: string } | null;
+  vectors: { status: string; indexed: number; failed: number; note: string | null };
+  snapshot: { status: string; error: string | null; retry: string | null };
+  notice: string | null;
+}
+
+interface ImportReport {
+  committed: boolean;
+  post_failures: number;
+  notice: string | null;
+  retry: string | null;
+  vectors: { status: string; note: string | null };
+  snapshot: { status: string; retry: string | null };
+}
+
+test('分歧拍板后快照写不了（真实进程）：回执先说已落库、不叫人重新导入或再拍一次；库里确实已解决、同一条只拍一次；归档导入仍保留重导同一个包的提示', async () => {
+  const { root, env } = home();
+  const broken = temp();
+  try {
+    const db = join(root, 'd.db');
+    const store = openStore(db);
+    store.insertPrinciple({ scope: 'personal', triggerWhen: '当你准备删除一个目录的时候', rule: '直接 rm -rf 就行', now: '2026-11-27T10:00:00.000Z' });
+    store.insertDilemma({ scope: 'personal', kind: 'iron_rule_collision', summary: '新经历说可以直接删目录，但铁律要求先确认', optionA: '保留现有原则：删目录前先确认', optionB: '采用新规则：先看是不是软链接', relatedPrincipleIds: [1], sourceExperienceIds: [], now: '2026-11-27T10:00:00.000Z' });
+    store.insertDilemma({ scope: 'personal', kind: 'value_conflict', summary: '周末要不要处理工作消息', optionA: '周末不处理', optionB: '周末也处理', now: '2026-11-27T10:00:00.000Z' });
+    store.close();
+    blockSnapshot(broken);
+    const here = { ...env, MEMLOOM_HOME: broken };
+
+    // 选 B：原则已落库、分歧已解决；只有快照这一步失败 → 退出码照旧是 1，回执先说已落库
+    const chooseB = await run(['--db', db, 'dilemmas', 'resolve', '1', '--choice', 'B', '--confirm', '1', '--target', '1', '--trigger', '当你准备删除一个目录的时候', '--rule', '先 ls -la 看一眼是不是软链接，确认后再删，不要带尾斜杠', '--json'], here);
+    assert.equal(chooseB.code, 1, chooseB.stderr);
+    const report = JSON.parse(chooseB.stdout) as ResolveReport;
+    assert.equal(report.committed, true);
+    assert.deepEqual([report.resolved.id, report.resolved.status], [1, 'resolved']);
+    assert.deepEqual([report.principle.id, report.superseded?.id, report.superseded?.status], [2, 1, 'superseded']);
+    assert.equal(report.vectors.status, 'degraded', '没有向量模型只是正常退化，不算后置失败');
+    assert.equal(report.snapshot.status, 'failed');
+    assert.equal(report.post_failures, 1);
+    assert.match(report.snapshot.error ?? '', /STANDING\.md/);
+    assert.match(report.notice ?? '', /已按选择 B 解决并落库（新原则 #2 已写入，旧条目已标为被替代，不是回滚）.*记录已经落库，不用再拍一次板，也不用重新导入；运行 memloom doctor/s);
+    assert.match(report.snapshot.retry ?? '', /不需要重做任何操作：分歧已经落库.*memloom doctor/s);
+    // 以前这里叫人「重新执行 memloom import <同一个包>」：拍板之后不能再出现这句话
+    assert.doesNotMatch(chooseB.stdout + chooseB.stderr, /memloom import|重新拍板/);
+    assert.equal(existsSync(join(broken, 'readable', 'personal', 'PRINCIPLES.md')), false, '快照确实没写出来');
+
+    // 选 A 同理：人读的那份回执也要说准
+    const chooseA = await run(['--db', db, 'dilemmas', 'resolve', '2', '--choice', 'A', '--confirm', '2'], here);
+    assert.equal(chooseA.code, 1, chooseA.stderr);
+    assert.match(chooseA.stdout, /分歧 #2 已按选择 A 解决/);
+    assert.match(chooseA.stdout, /可读快照没刷新：.*重试：不需要重做任何操作/s);
+    assert.match(chooseA.stdout, /注意：分歧已按选择 A 解决并落库（不是回滚）.*记录已经落库，不用再拍一次板，也不用重新导入；运行 memloom doctor/s);
+    assert.doesNotMatch(chooseA.stdout, /memloom import/);
+
+    // 只拍一次：同一条分歧再来一次直接拒绝，库里的结论不变
+    const again = await run(['--db', db, 'dilemmas', 'resolve', '1', '--choice', 'A', '--confirm', '1'], here);
+    assert.equal(again.code, 1);
+    assert.match(again.stderr, /不重复执行/);
+    const after = openStore(db);
+    assert.equal(after.getDilemma(1).status, 'resolved');
+    assert.equal(after.getDilemma(2).status, 'resolved');
+    assert.equal(after.getPrinciple(1).status, 'superseded');
+    assert.equal(after.getPrinciple(2).status, 'active');
+    assert.equal(after.listDilemmas('personal').length, 0, '没有待拍板的分歧了');
+    after.close();
+
+    // 归档导入的已承诺提示原样保留：同一个坏目录下导入，仍然先说「数据库已提交」，并指向重导同一个包
+    const archive = join(root, 'keep.tar.gz');
+    assert.equal((await run(['--db', db, 'export', '--out', archive], env)).code, 0);
+    const imported = await run(['--db', join(broken, 'e.db'), 'import', archive], here);
+    assert.equal(imported.code, 1, imported.stderr);
+    assert.match(imported.stdout, /数据库已提交（.*不是回滚/s);
+    assert.match(imported.stdout, /可读快照没刷新：.*修好目录权限后重新执行 memloom import <同一个包>/s);
+    assert.equal(existsSync(REAL_HOME), realHomeBefore, '真实 ~/.memloom 没有被创建');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(broken, { recursive: true, force: true });
+  }
+});
+
+/** 进程内用的检索器替身：只把出问题的那一步换掉，其余照常回答 */
+function stubRetriever(overrides: Partial<Retriever>): Retriever {
+  return {
+    modelId: 'stub-retriever:8',
+    dimensions: 8,
+    embed: async (texts) => texts.map(() => new Float32Array(8).fill(0.5)),
+    rerank: async () => [],
+    health: async () => ({ ok: true, mode: 'local-onnx' as const, detail: '进程内替身' }),
+    ...overrides,
+  };
+}
+
+test('分歧拍板后向量这一步起不来 / 抛错 / 只建了一部分（进程内）：回执都只说「已落库，不用再拍一次板」并指向 doctor，库里确实已解决且只拍一次；同样的坏情况走归档导入仍说重导同一个包', async () => {
+  const cases: Array<{ name: string; retriever: Retriever; note: RegExp }> = [
+    { name: 'health 抛错', retriever: stubRetriever({ health: async () => { throw new Error('模拟检索服务起不来'); } }), note: /向量重建这一步出错（模拟检索服务起不来）。记录已经落库，不用再拍一次板，也不用重新导入；.*memloom doctor/s },
+    { name: 'embed 抛错', retriever: stubRetriever({ embed: async () => { throw new Error('模拟向量接口超时'); } }), note: /向量没有全部建完（模拟向量接口超时）。记录已经落库，不用再拍一次板，也不用重新导入；.*memloom doctor/s },
+    // 生效原则按编号一批送过去：第一条给够 8 维、第二条只给 3 维 → 建成 1 条、失败 1 条
+    { name: '只建了一部分', retriever: stubRetriever({ embed: async (texts) => texts.map((_text, index) => new Float32Array(index === 0 ? 8 : 3)) }), note: /向量没有全部建完（失败 1 条）。记录已经落库，不用再拍一次板，也不用重新导入；.*memloom doctor/s },
+  ];
+  for (const one of cases) {
+    const root = temp();
+    try {
+      const dbPath = join(root, 'p.db');
+      const store = openStore(dbPath);
+      store.insertPrinciple({ scope: 'personal', triggerWhen: '当你准备删除一个目录的时候', rule: '直接 rm -rf 就行', now: '2026-11-27T10:00:00.000Z' });
+      store.insertPrinciple({ scope: 'personal', triggerWhen: '到了周末有人发工作消息的时候', rule: '不回复，等到周一上班再统一处理', now: '2026-11-27T10:00:00.000Z' });
+      store.insertDilemma({ scope: 'personal', kind: 'iron_rule_collision', summary: '新经历说可以直接删目录，但铁律要求先确认', optionA: '保留现有原则：删目录前先确认', optionB: '采用新规则：先看是不是软链接', relatedPrincipleIds: [1], sourceExperienceIds: [], now: '2026-11-27T10:00:00.000Z' });
+      store.close();
+      const app = new Memloom(resolveContext({ home: root, db: dbPath }), { retriever: one.retriever });
+      try {
+        const report = (await app.dilemmaResolve({ id: 1, choice: 'B', confirm: 1, targetId: 1, triggerWhen: '当你准备删除一个目录的时候', rule: '先 ls -la 看一眼是不是软链接，确认后再删，不要带尾斜杠' })) as ResolveReport;
+        assert.equal(report.committed, true, one.name);
+        assert.equal(report.resolved.status, 'resolved', one.name);
+        assert.deepEqual([report.principle.id, report.superseded?.id], [3, 1], one.name);
+        assert.equal(report.vectors.status, 'failed', one.name);
+        assert.equal(report.snapshot.status, 'ok', one.name);
+        assert.equal(report.post_failures, 1, one.name);
+        if (one.name === '只建了一部分') assert.deepEqual([report.vectors.indexed, report.vectors.failed], [1, 1]);
+        assert.match(report.vectors.note ?? '', one.note);
+        assert.match(report.notice ?? '', /已按选择 B 解决并落库（新原则 #3 已写入，旧条目已标为被替代，不是回滚）.*记录已经落库，不用再拍一次板，也不用重新导入；运行 memloom doctor/s);
+        assert.doesNotMatch(JSON.stringify(report), /memloom import|重新拍板/, one.name);
+        // 只拍一次：再来一次直接拒绝，什么都不改
+        await assert.rejects(app.dilemmaResolve({ id: 1, choice: 'A', confirm: 1 }), /不重复执行/);
+        const check = app.store;
+        assert.equal(check.getDilemma(1).status, 'resolved', one.name);
+        assert.equal(check.getPrinciple(1).status, 'superseded', one.name);
+        assert.equal(check.getPrinciple(3).status, 'active', one.name);
+      } finally {
+        app.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  // 同样的坏情况（向量接口抛错 + 快照目录写不了）走归档导入：已承诺的「数据库已提交 + 重导同一个包」文案和行为原样保留
+  const root = temp();
+  try {
+    const source = new Memloom(resolveContext({ home: root, db: join(root, 'a.db') }));
+    source.capture({ kind: 'pitfall', summary: '删目录之前先 ls -la 看一眼是不是软链接，不要顺着链接把目标目录删了。' });
+    const archive = join(root, 'a.tar.gz');
+    source.exportArchive({ outPath: archive });
+    source.close();
+    const broken = join(root, 'broken-home');
+    blockSnapshot(broken);
+    const target = new Memloom(resolveContext({ home: broken, db: join(broken, 'b.db') }), { retriever: cases[1]?.retriever });
+    try {
+      const report = (await target.importArchive({ archivePath: archive })) as ImportReport;
+      assert.equal(report.committed, true);
+      assert.equal(report.post_failures, 2, '向量和快照都没完成');
+      assert.match(report.notice ?? '', /数据库已提交（.*不是回滚.*重试：重新执行 memloom import <同一个包>/s);
+      assert.match(report.vectors.note ?? '', /修好检索服务后重新执行 memloom import <同一个包>/);
+      assert.match(report.snapshot.retry ?? '', /修好目录权限后重新执行 memloom import <同一个包>/);
+      assert.match(report.retry ?? '', /重新执行 memloom import <同一个包>/);
+    } finally {
+      target.close();
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

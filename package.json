@@ -2,7 +2,7 @@
   "name": "memloom",
   "version": "0.1.0",
   "private": true,
-  "description": "把 AI Agent 干活攒下的零散经历，织成真正管用、人也能一眼看懂的工作原则（M3：便携归档、命令行与 MCP）",
+  "description": "把 AI Agent 干活攒下的零散经历，织成真正管用、人也能一眼看懂的工作原则",
   "bin": {
     "memloom": "dist/src/cli/main.js",
     "memloom-mcp": "dist/src/mcp/main.js"

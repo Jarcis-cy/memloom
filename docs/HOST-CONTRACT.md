@@ -1,4 +1,4 @@
-# memloom 宿主契约（公开版 v1.4）
+# memloom 宿主契约（公开版 v1.5）
 
 这份文档说清「宿主适配层」和「宿主无关核心」之间的约定。字段名就是 `src/host/types.ts` / `src/host/index.ts` 的导出名；要改字段，先在这里改版本号，再通知 `adapters/` 的维护者。
 
@@ -71,6 +71,7 @@ interface HostResponse {
 
 - 一次提醒（一条用户消息，或一个失败的工具结果）在前台最多等 `hint.budgetMs`（默认 **2000 毫秒**，`MEMLOOM_HINT_BUDGET_MS` 可改）；候选只取几条，超时就丢，不排队、不补发。冷启动 / 坏模型 / 无模型一律静默，不用字面分冒充语义分。
 - 这是**单次预算**，不是延迟承诺，也不承诺供应商的缓存命中率。
+- 参考实测（2026-11-27，本机 16 核、Node 24.15，只说明那台机器那一次）：温态下 6 条候选整次召回 1.40~1.63 秒，冷启动 8~13 秒——默认预算定在 2000 毫秒而不是更低；调低预算只会让提醒更少。
 - `session_start` 默认在后台 `warmup()` 一次共享检索服务（`MEMLOOM_WARMUP=0` 关），让第一条真正的消息时模型已就绪；宿主进程从不加载 ONNX。
 
 ## 5. 后台活动（登记在 `background`，用户会话不等）
@@ -88,7 +89,7 @@ interface HostResponse {
 
 ## 6. 配置与目录边界
 
-`resolveHostConfig(flags, env)` 和命令行同一套：`MEMLOOM_HOME`（默认 `~/.memloom`）、`MEMLOOM_DB`、`MEMLOOM_PROJECT` + `MEMLOOM_ROLE`、`MEMLOOM_STATE_DIR`，检索与后台模型变量见根目录 README。宿主专用的：
+`resolveHostConfig(flags, env)` 和命令行同一套：`MEMLOOM_HOME`（默认 `~/.memloom`）、`MEMLOOM_DB`、`MEMLOOM_PROJECT` + `MEMLOOM_ROLE`、`MEMLOOM_STATE_DIR`，检索与后台模型变量见 [USAGE.md](USAGE.md) 第 2、3 节。宿主专用的：
 
 | 变量 | 含义 |
 |---|---|
@@ -121,6 +122,7 @@ const start = await core.handle({ type: 'session_start', sessionId });   // star
 const turn = await core.handle({ type: 'user_message', sessionId, text: prompt }); // turn.hint !== '' → 挂当轮尾部
 core.close();
 ```
+带注释的完整例子（后台活动、会话快照、模型自动下载、Pi 接法）见 [USAGE.md](USAGE.md) 第 6 节。
 
 ## 9. 版本
 
@@ -129,4 +131,5 @@ core.close();
 - v1.2（2026-11-27）：决定只接 Pi，保留通用子进程入口。导出形状不变。
 - v1.3（2026-11-27）：`tool_result` 新增可选 `skipHint`（缺省不变）；`session_end` 改为保留同库同作用域的快照（清对话片段）以保证续会话原字节；任务说明不含凭据、凭据只走子进程环境；默认预算注明是单次提醒的预算。`HostResponse` 形状不变。
 - v1.4（2026-11-28）：`background` 新增 `model-download`（auto / local-onnx 模式缺本地模型时，`session_start` 登记一次：`spawned` = 刚拉起后台下载、`coalesced` = 已有下载在跑、`skipped` = 退避期 / 镜像地址无效 / 拉不起来；关了自动下载、配了 API 或 fts-only 时不登记）。提醒在模型下完前照常静默，下完并在模型目录根 manifest.json 原子标成 ready 之后的下一次提醒自动走本地语义检索；`HostResponse` 其余形状不变。
+- v1.5（2026-11-28）：文字整理——配置、检索与模型下载细节的出处从根 README 移到 `USAGE.md`（这里只留指针），补了一条参考实测；事件 / 回执字段、落点和导出形状都没变。
 - 改任何字段：这里改版本 + 通知 `adapters/` 的维护者。

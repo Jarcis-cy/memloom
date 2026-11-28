@@ -76,8 +76,15 @@ export interface SnapshotReport {
 }
 
 /** 后置步骤共同的 重试说法：重复导入 / 重新拍板不会重复写记录 */
+/** 落库之后还有后置步骤（向量、可读快照）的两条入口：导入可以重导同一个包；分歧拍板只拍一次 */
+type PostFlow = 'import' | 'dilemma';
+
+/** 导入的重试说法（已经对用户承诺过，原样保留）：重复导入不会重复写记录，只补做没完成的后置步骤 */
 const RETRY_IMPORT = '重新执行 memloom import <同一个包>（重复导入不会产生重复记录，只会补做没完成的后置步骤）';
 
+/** 分歧拍板落库之后：不说「重试导入」，也不叫人再拍一次；排错只指向已经存在的 doctor */
+const DILEMMA_SETTLED = '记录已经落库，不用再拍一次板，也不用重新导入';
+const DOCTOR_HINT = '运行 memloom doctor 可以看到当前的检索档位、本地模型状态和向量情况';
 function toId(value: unknown, what: string): number {
   const id = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
   if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0) throw new UsageError(`${what} 要是正整数编号，收到的是「${String(value)}」`);
@@ -321,7 +328,7 @@ export class Memloom {
       const resolved = this.store.transaction(() =>
         this.store.setDilemmaResolution(id, { status: 'resolved', note: `用户选择 A：${dilemma.optionA}。保留现有原则，没有改动任何原则。`, resolvedAt: at }),
       );
-      const snapshot = this.snapshotSafe(scope);
+      const snapshot = this.snapshotSafe(scope, 'dilemma');
       return {
         resolved: { id: resolved.id, status: resolved.status, resolution: resolved.resolution },
         choice: 'A',
@@ -331,7 +338,7 @@ export class Memloom {
         snapshot,
         committed: true,
         post_failures: snapshot.status === 'failed' ? 1 : 0,
-        notice: snapshot.status === 'failed' ? `分歧已按选择 A 解决并落库（不是回滚）；只是可读快照没刷新：${snapshot.error}。重试：${snapshot.retry}` : null,
+        notice: snapshot.status === 'failed' ? `分歧已按选择 A 解决并落库（不是回滚）；只是可读快照没刷新：${snapshot.error}。${DILEMMA_SETTLED}；${DOCTOR_HINT}` : null,
       };
     }
 
@@ -396,8 +403,8 @@ export class Memloom {
       });
       return { row, resolved };
     });
-    const vectors = await this.reindexSafe(scope, retriever);
-    const snapshot = this.snapshotSafe(scope);
+    const vectors = await this.reindexSafe(scope, retriever, 'dilemma');
+    const snapshot = this.snapshotSafe(scope, 'dilemma');
     return {
       resolved: { id: outcome.resolved.id, status: outcome.resolved.status, resolution: outcome.resolved.resolution },
       choice: 'B',
@@ -409,7 +416,7 @@ export class Memloom {
       post_failures: (vectors.status === 'failed' ? 1 : 0) + (snapshot.status === 'failed' ? 1 : 0),
       notice:
         vectors.status === 'failed' || snapshot.status === 'failed'
-          ? `分歧已按选择 B 解决并落库（新原则 #${outcome.row.id} 已写入，旧条目已标为被替代，不是回滚）；只是后置步骤没全部完成，见 vectors / snapshot。不用再拍一次板；重试：${RETRY_IMPORT}`
+          ? `分歧已按选择 B 解决并落库（${target ? `新原则 #${outcome.row.id} 已写入，旧条目已标为被替代` : `新增原则 #${outcome.row.id}`}，不是回滚）；只是后置步骤没全部完成，见 vectors / snapshot。${DILEMMA_SETTLED}；${DOCTOR_HINT}`
           : null,
     };
   }
@@ -455,8 +462,8 @@ export class Memloom {
     const retriever = this.retrieverFor('导入');
     const report = await importArchive({ store: this.store, scope, archivePath: args.archivePath, mode, projectDir: this.ctx.projectDir, projectId: this.ctx.projectId, judge: this.options.judge, now: () => this.now() });
     // 事务已提交：下面每一步都单独保护，失败只报告、不改写已落库的事实
-    const vectors = await this.reindexSafe(scope, retriever);
-    const snapshot = this.snapshotSafe(scope);
+    const vectors = await this.reindexSafe(scope, retriever, 'import');
+    const snapshot = this.snapshotSafe(scope, 'import');
     const post = { team: { ...report.team }, vectors, snapshot };
     const post_failures = report.team.failed.length + (vectors.status === 'failed' ? 1 : 0) + (snapshot.status === 'failed' ? 1 : 0);
     const notice =
@@ -475,11 +482,12 @@ export class Memloom {
     }
   }
 
-  /** 导入 / 拍板已经落库之后的向量重建：出错只报告，不抛 */
-  private async reindexSafe(scope: string, retriever: Retriever): Promise<VectorReport> {
+  /** 导入 / 拍板已经落库之后的向量重建：出错只报告，不抛；下一步怎么说按入口分开（导入 → 重导同一个包；拍板 → 已经落库，不用再拍） */
+  private async reindexSafe(scope: string, retriever: Retriever, flow: PostFlow): Promise<VectorReport> {
     try {
-      return await this.reindex(scope, retriever);
+      return await this.reindex(scope, retriever, flow);
     } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
       return {
         status: 'failed',
         indexed: 0,
@@ -487,29 +495,39 @@ export class Memloom {
         scanned: 0,
         model: retriever.modelId,
         health: null,
-        reason: error instanceof Error ? error.message : String(error),
-        note: `向量重建这一步出错（记录已经落库，不是回滚）。重试：${RETRY_IMPORT}`,
+        reason,
+        note:
+          flow === 'import'
+            ? `向量重建这一步出错（记录已经落库，不是回滚）。重试：${RETRY_IMPORT}`
+            : `向量重建这一步出错（${reason}）。${DILEMMA_SETTLED}；没建上向量的条目召回时只按字面找。${DOCTOR_HINT}`,
       };
     }
   }
 
-  /** 导入 / 拍板已经落库之后的可读快照：出错只报告，不抛 */
-  private snapshotSafe(scope: string): SnapshotReport {
+  /** 导入 / 拍板已经落库之后的可读快照：出错只报告，不抛；导入说重导，拍板说不用重做任何操作 */
+  private snapshotSafe(scope: string, flow: PostFlow): SnapshotReport {
     try {
       return { status: 'ok', error: null, retry: null, ...this.writeSnapshot(scope) };
     } catch (error) {
+      const dir = this.snapshotDir(scope);
       return {
         status: 'failed',
-        dir: this.snapshotDir(scope),
+        dir,
         files: [],
         error: error instanceof Error ? error.message : String(error),
-        retry: `可读快照只是数据库的单向视图，不影响记忆本身；修好目录权限后${RETRY_IMPORT}`,
+        retry:
+          flow === 'import'
+            ? `可读快照只是数据库的单向视图，不影响记忆本身；修好目录权限后${RETRY_IMPORT}`
+            : `不需要重做任何操作：分歧已经落库，可读快照只是给人看的单向视图，缺着不影响记忆和召回；按报错修好 ${dir} 后，之后的导入或分歧拍板会重新生成它。${DOCTOR_HINT}`,
       };
     }
   }
 
-  /** 导入 / 接替之后按作用域补建缺失的向量；没有模型就如实说没有建，并给出重试办法。 */
-  async reindex(scope: string, retriever: Retriever = this.retriever): Promise<VectorReport> {
+  /**
+   * 导入 / 接替之后按作用域补建缺失的向量；没有模型就如实说没有建。
+   * 下一步怎么说按入口分开：导入 → 重导同一个包补建；分歧拍板 → 已经落库，不用再拍，没建上向量的条目召回时只按字面找。
+   */
+  async reindex(scope: string, retriever: Retriever = this.retriever, flow: PostFlow = 'import'): Promise<VectorReport> {
     const health = await retriever.health();
     if (retriever.dimensions <= 0) {
       return {
@@ -520,7 +538,10 @@ export class Memloom {
         model: retriever.modelId,
         health,
         reason: health.detail ?? '当前没有可用的向量模型（fts-only）',
-        note: '记录已经落库，但向量没有建：当前没有可用的向量模型，召回只有字面结果。配好模型后重新执行 memloom import <同一个包> 即可补建（重复导入不会产生重复记录）',
+        note:
+          flow === 'import'
+            ? '记录已经落库，但向量没有建：当前没有可用的向量模型，召回只有字面结果。配好模型后重新执行 memloom import <同一个包> 即可补建（重复导入不会产生重复记录）'
+            : `向量没有建：当前没有可用的向量模型，召回只有字面结果（新原则按字面仍能找到）。${DOCTOR_HINT}`,
       };
     }
     const result = await rebuildVectors({ store: this.store, scope, retriever, maxRows: 5000 });
@@ -534,7 +555,9 @@ export class Memloom {
       reason: result.reason,
       note:
         result.reason || result.failed > 0
-          ? `向量没有全部建完（${result.reason ?? `失败 ${result.failed} 条`}）。记录已经落库；修好检索服务后重新执行 memloom import <同一个包> 即可补建（重复导入不会产生重复记录）`
+          ? flow === 'import'
+            ? `向量没有全部建完（${result.reason ?? `失败 ${result.failed} 条`}）。记录已经落库；修好检索服务后重新执行 memloom import <同一个包> 即可补建（重复导入不会产生重复记录）`
+            : `向量没有全部建完（${result.reason ?? `失败 ${result.failed} 条`}）。${DILEMMA_SETTLED}；没建上向量的条目召回时只按字面找。${DOCTOR_HINT}`
           : null,
     };
   }

@@ -42,7 +42,7 @@ const USAGE = `memloom —— 把 AI Agent 干活攒下的经历织成工作原�
 通用参数：--home <目录>（默认 ~/.memloom）、--db <库文件>、--project <项目目录>、--role <角色名>、
           --state-dir <状态目录>、--scope <作用域>、--json（按 JSON 输出）
 环境变量：MEMLOOM_HOME / MEMLOOM_DB / MEMLOOM_PROJECT / MEMLOOM_ROLE / MEMLOOM_STATE_DIR / MEMLOOM_SCOPE、
-          检索配置见 README「本地运行（M2）」、后台模型 MEMLOOM_LLM_BASE_URL / MEMLOOM_LLM_MODEL / MEMLOOM_LLM_API_KEY、
+          检索配置见 docs/USAGE.md、后台模型 MEMLOOM_LLM_BASE_URL / MEMLOOM_LLM_MODEL / MEMLOOM_LLM_API_KEY、
           模型自动下载 MEMLOOM_AUTO_DOWNLOAD=0（关闭）/ MEMLOOM_HF_ENDPOINT（镜像源）
 `;
 
@@ -458,7 +458,6 @@ async function main(): Promise<number> {
     // 已落库但后置步骤有失败：用非零退出表示「部分失败」，回执里已经先写明「已落库，不是回滚」
     const flow = result as { committed?: boolean; post_failures?: number } | undefined;
     return flow?.committed === true && (flow.post_failures ?? 0) > 0 ? 1 : 0;
-    return 0;
   } catch (error) {
     if (error instanceof NotConfiguredError) {
       process.stderr.write(`${error.message}\n`);
